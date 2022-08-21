@@ -1,8 +1,11 @@
 fun<void> main = %{
     *char text = "Hello, World!";
-    i32 variable = 200;
+    i32 variable = 124;
     print(text);
     text = "np";
     print(text);
-    printint(variable == 200);
+    while (variable > 0) {
+        printint(variable);
+        variable = variable - 1;
+    };
 };

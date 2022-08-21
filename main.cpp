@@ -233,9 +233,7 @@ class ASTNumber : public ASTNode {
 
   virtual void print(std::ostream &out) const { out << value_; }
 
-  virtual void run(Runner *runner, void *out) const {
-    *(int *)out = value_;
-  }
+  virtual void run(Runner *runner, void *out) const { *(int *)out = value_; }
 
  private:
   int value_;
@@ -438,6 +436,73 @@ class ASTFunctionCall : public ASTNode {
   std::string name_;
   ASTNodeList *args_;
 };
+class ASTIf : public ASTNode {
+ public:
+  ASTIf(ASTNode *condition, ASTNode *body, ASTNode *elseBody)
+      : condition_(condition), body_(body), elseBody_(elseBody) {}
+
+  virtual ~ASTIf() {
+    delete condition_;
+    delete body_;
+    delete elseBody_;
+  }
+
+  virtual void print(std::ostream &out) const {
+    out << "if (";
+    condition_->print(out);
+    out << ") ";
+    body_->print(out);
+    if (elseBody_ != nullptr) {
+      out << " else ";
+      elseBody_->print(out);
+    }
+  }
+
+  virtual void run(Runner *runner, void *out) const {
+    int conditionOutput;
+    condition_->run(runner, &conditionOutput);
+    if (conditionOutput) {
+      body_->run(runner, out);
+    } else if (elseBody_ != nullptr) {
+      elseBody_->run(runner, out);
+    }
+  }
+
+ private:
+  ASTNode *condition_;
+  ASTNode *body_;
+  ASTNode *elseBody_;
+};
+class ASTWhile : public ASTNode {
+ public:
+  ASTWhile(ASTNode *condition, ASTNode *body)
+      : condition_(condition), body_(body) {}
+
+  virtual ~ASTWhile() {
+    delete condition_;
+    delete body_;
+  }
+
+  virtual void print(std::ostream &out) const {
+    out << "while (";
+    condition_->print(out);
+    out << ") ";
+    body_->print(out);
+  }
+
+  virtual void run(Runner *runner, void *out) const {
+    int conditionOutput;
+    condition_->run(runner, &conditionOutput);
+    while (conditionOutput) {
+      body_->run(runner, out);
+      condition_->run(runner, &conditionOutput);
+    }
+  }
+
+ private:
+  ASTNode *condition_;
+  ASTNode *body_;
+};
 
 class Parser {
  public:
@@ -465,10 +530,12 @@ class Parser {
       return isalnum(i) || i == '_';
     }
   }
-  bool isValidOperatorChar(char i, int pos = 0, bool shouldIncludeSemicolon = false) {
+  bool isValidOperatorChar(char i, int pos = 0,
+                           bool shouldIncludeSemicolon = false) {
     return i == '+' || i == '-' || i == '*' || i == '/' || i == '%' ||
            i == '^' || i == '&' || i == '|' || i == '!' || i == '~' ||
-           i == '<' || i == '>' || i == '=' || i == '?' || i == ':' || (shouldIncludeSemicolon && i == ';');
+           i == '<' || i == '>' || i == '=' || i == '?' || i == ':' ||
+           (shouldIncludeSemicolon && i == ';');
   }
   std::string parseIdentifier() {
     skipWhitespace();
@@ -621,7 +688,7 @@ class Parser {
       if (expressionType == VAR_DECLARATION) {
         result->add(parseVariableDecl());
         if (in_.get() != ';') {
-          throw std::runtime_error("Expected ';'");
+          throw std::runtime_error("Expected ';' after variable declaration");
         }
       } else if (expressionType == VAR_ASSIGNMENT) {
         std::string name = parseIdentifier();
@@ -631,13 +698,16 @@ class Parser {
         skipWhitespace();
         ASTNode *value = parseExpression();
         if (in_.get() != ';') {
-          throw std::runtime_error("Expected ';'");
+          throw std::runtime_error("Expected ';' after variable assignment");
         }
         result->add(new ASTVariableAssign(name, value));
       } else {
-        result->add(parseExpression());
+        ASTNode *value = parseExpression();
+        result->add(value);
+        value->print(std::cout);
+        std::cout << std::endl;
         if (in_.get() != ';') {
-          throw std::runtime_error("Expected ';'");
+          throw std::runtime_error("Expected ';' after expression");
         }
       }
 
@@ -704,26 +774,73 @@ class Parser {
       skipWhitespace();
     } else if (isValidIdentifierChar(in_.peek())) {
       std::string name = parseIdentifier();
-      skipWhitespace();
-      if (in_.peek() == '(') {
-        in_.get();
-        ASTNodeList *args = new ASTNodeList();
-        while (in_.peek() != ')') {
-          skipWhitespace();
-          args->add(parseExpression());
-          skipWhitespace();
-          if (in_.peek() == ',') {
-            in_.get();
-          } else {
-          }
-        }
-        in_.get();
 
-        result = new ASTFunctionCall(name, args);
-      } else {
-        result = new ASTVariable(name);
-      }
       skipWhitespace();
+      // special identifiers
+      if (name == "if") {
+        ASTNode *condition = parseExpression();
+        skipWhitespace();
+        if (in_.get() != '{') {
+          throw std::runtime_error("Expected '{'");
+        }
+        ASTNode *ifBody = parseBody();
+        skipWhitespace();
+        if (in_.get() != '}') {
+          throw std::runtime_error("Expected '}'");
+        }
+        skipWhitespace();
+        ASTNode *elseBody = nullptr;
+        if (in_.peek() == 'e') {
+          std::string elseName = parseIdentifier();
+          if (elseName != "else") {
+            throw std::runtime_error("Expected 'else'");
+          }
+          skipWhitespace();
+          if (in_.get() != '{') {
+            throw std::runtime_error("Expected '{'");
+          }
+          skipWhitespace();
+          elseBody = parseBody();
+          if (in_.get() != '}') {
+            throw std::runtime_error("Expected '}'");
+          }
+          skipWhitespace();
+        }
+        result = new ASTIf(condition, ifBody, elseBody);
+      } else if (name == "while") {
+        ASTNode *condition = parseExpression();
+        skipWhitespace();
+        if (in_.get() != '{') {
+          throw std::runtime_error("Expected '{'");
+        }
+        skipWhitespace();
+        ASTNode *body = parseBody();
+        if (in_.get() != '}') {
+          throw std::runtime_error("Expected '}'");
+        }
+        skipWhitespace();
+        result = new ASTWhile(condition, body);
+      } else {
+        if (in_.peek() == '(') {
+          in_.get();
+          ASTNodeList *args = new ASTNodeList();
+          while (in_.peek() != ')') {
+            skipWhitespace();
+            args->add(parseExpression());
+            skipWhitespace();
+            if (in_.peek() == ',') {
+              in_.get();
+            } else {
+            }
+          }
+          in_.get();
+
+          result = new ASTFunctionCall(name, args);
+        } else {
+          result = new ASTVariable(name);
+        }
+        skipWhitespace();
+      }
     } else {
       result = parseTerm();
     }
