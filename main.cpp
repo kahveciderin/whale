@@ -1,6 +1,7 @@
 #include <cctype>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -11,7 +12,19 @@ class ASTNode {
  public:
   virtual ~ASTNode() {}
   virtual void print(std::ostream &out) const = 0;
-  virtual void run(Runner *runner) const = 0;
+  virtual void run(Runner *runner, void *out = nullptr) const = 0;
+};
+
+class Runner {
+ public:
+  std::map<std::string, std::pair<ASTNode *, void *>> variables;
+  Runner(ASTNode *ast) : ast_(ast) {}
+
+  void run(void *out) { ast_->run(this, out); }
+  void *alloc(int size) { return malloc(size); }
+
+ private:
+  ASTNode *ast_;
 };
 
 class ASTNodeList : public ASTNode {
@@ -30,14 +43,15 @@ class ASTNodeList : public ASTNode {
     }
   }
 
-  virtual void run(Runner *runner) const {
+  virtual void run(Runner *runner, void *out) const {
     for (auto node : nodes_) {
       node->run(runner);
     }
   }
 
- private:
   std::vector<ASTNode *> nodes_;
+
+ private:
 };
 
 class ASTType : public ASTNode {
@@ -46,7 +60,25 @@ class ASTType : public ASTNode {
 
   virtual void print(std::ostream &out) const { out << name_; }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {
+    if (name_ == "i32") {
+      *(int *)out = sizeof(int);
+    } else if (name_ == "i64") {
+      *(int *)out = sizeof(long int);
+    } else if (name_ == "float") {
+      *(int *)out = sizeof(float);
+    } else if (name_ == "double") {
+      *(int *)out = sizeof(double);
+    } else if (name_ == "void") {
+      *(int *)out = sizeof(char);
+    } else if (name_ == "bool") {
+      *(int *)out = sizeof(bool);
+    } else if (name_ == "char") {
+      *(int *)out = sizeof(char);
+    } else {
+      throw std::runtime_error("Unknown type: " + name_);
+    }
+  }
 
  private:
   std::string name_;
@@ -61,7 +93,9 @@ class ASTPointer : public ASTNode {
     out << ")";
   }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {
+    *(int *)out = sizeof(void *);
+  }
 
  private:
   ASTNode *type_;
@@ -78,7 +112,12 @@ class ASTArray : public ASTNode {
     out << ")";
   }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {
+    int sizeOutput, typeOutput;
+    size_->run(runner, &sizeOutput);
+    type_->run(runner, &typeOutput);
+    *(int *)out = sizeOutput * typeOutput;
+  }
 
  private:
   ASTNode *type_;
@@ -90,13 +129,16 @@ class ASTTemplate : public ASTNode {
       : type_(type), name_(name) {}
 
   virtual void print(std::ostream &out) const {
-    out << "<";
+    out << "TEMPLATE(";
     out << name_;
-    out << ">";
+    out << ", ";
     type_->print(out);
+    out << ")";
   }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {
+    *(int *)out = sizeof(void *);  // templates always have a pointer size
+  }
 
  private:
   ASTNode *type_;
@@ -113,7 +155,16 @@ class ASTFunctionArg : public ASTNode {
     type_->print(out);
   }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {
+    int bytes;
+    type_->run(runner, &bytes);
+    void *ptr = runner->alloc(bytes);
+    std::cout << "Allocated " << bytes << " bytes for " << name_ << " on "
+              << ptr << std::endl;
+    runner->variables[name_] = std::make_pair(type_, ptr);
+
+    *(void **)out = ptr;
+  }
 
  private:
   ASTNode *type_;
@@ -126,7 +177,7 @@ class ASTNumber : public ASTNode {
 
   virtual void print(std::ostream &out) const { out << value_; }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const { *(int *)out = value_; }
 
  private:
   int value_;
@@ -137,7 +188,7 @@ class ASTString : public ASTNode {
 
   virtual void print(std::ostream &out) const { out << '"' << value_ << '"'; }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {}
 
  private:
   std::string value_;
@@ -161,7 +212,50 @@ class ASTBinaryOp : public ASTNode {
     out << ")";
   }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {
+    int leftOutput, rightOutput;
+    left_->run(runner, &leftOutput);
+    right_->run(runner, &rightOutput);
+    if (op_ == "+") {
+      *(int *)out = leftOutput + rightOutput;
+    } else if (op_ == "-") {
+      *(int *)out = leftOutput - rightOutput;
+    } else if (op_ == "*") {
+      *(int *)out = leftOutput * rightOutput;
+    } else if (op_ == "/") {
+      *(int *)out = leftOutput / rightOutput;
+    } else if (op_ == "%") {
+      *(int *)out = leftOutput % rightOutput;
+    } else if (op_ == "<<") {
+      *(int *)out = leftOutput << rightOutput;
+    } else if (op_ == ">>") {
+      *(int *)out = leftOutput >> rightOutput;
+    } else if (op_ == "&") {
+      *(int *)out = leftOutput & rightOutput;
+    } else if (op_ == "|") {
+      *(int *)out = leftOutput | rightOutput;
+    } else if (op_ == "^") {
+      *(int *)out = leftOutput ^ rightOutput;
+    } else if (op_ == "&&") {
+      *(int *)out = leftOutput && rightOutput;
+    } else if (op_ == "||") {
+      *(int *)out = leftOutput || rightOutput;
+    } else if (op_ == "==") {
+      *(int *)out = leftOutput == rightOutput;
+    } else if (op_ == "!=") {
+      *(int *)out = leftOutput != rightOutput;
+    } else if (op_ == "<") {
+      *(int *)out = leftOutput < rightOutput;
+    } else if (op_ == ">") {
+      *(int *)out = leftOutput > rightOutput;
+    } else if (op_ == "<=") {
+      *(int *)out = leftOutput <= rightOutput;
+    } else if (op_ == ">=") {
+      *(int *)out = leftOutput >= rightOutput;
+    } else {
+      throw std::runtime_error("Unknown operator: " + op_);
+    }
+  }
 
  private:
   std::string op_;
@@ -171,7 +265,7 @@ class ASTBinaryOp : public ASTNode {
 
 class ASTLambda : public ASTNode {
  public:
-  ASTLambda(ASTNode *args, ASTNode *body) : args_(args), body_(body) {}
+  ASTLambda(ASTNodeList *args, ASTNode *body) : args_(args), body_(body) {}
 
   virtual ~ASTLambda() { delete body_; }
 
@@ -183,11 +277,15 @@ class ASTLambda : public ASTNode {
     out << "}";
   }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {
+    std::cout << "LAMBDA address: " << this << std::endl;
+    *(const ASTLambda **)out = this;
+  }
+
+  ASTNodeList *args_;
+  ASTNode *body_;
 
  private:
-  ASTNode *body_;
-  ASTNode *args_;
 };
 class ASTVariableDecl : public ASTNode {
  public:
@@ -207,7 +305,16 @@ class ASTVariableDecl : public ASTNode {
     out << ";";
   }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {
+    int bytes;
+    type_->run(runner, &bytes);
+    void *ptr = runner->alloc(bytes);
+    std::cout << "Allocated " << bytes << " bytes for " << name_ << " on "
+              << ptr << std::endl;
+    runner->variables[name_] = std::make_pair(type_, ptr);
+
+    value_->run(runner, ptr);
+  }
 
  private:
   std::string name_;
@@ -220,7 +327,7 @@ class ASTVariable : public ASTNode {
 
   virtual void print(std::ostream &out) const { out << name_; }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {}
 
  private:
   std::string name_;
@@ -239,7 +346,7 @@ class ASTVariableAssign : public ASTNode {
     out << ";";
   }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {}
 
  private:
   std::string name_;
@@ -247,7 +354,7 @@ class ASTVariableAssign : public ASTNode {
 };
 class ASTFunctionCall : public ASTNode {
  public:
-  ASTFunctionCall(const std::string &name, ASTNode *args)
+  ASTFunctionCall(const std::string &name, ASTNodeList *args)
       : name_(name), args_(args) {}
 
   virtual ~ASTFunctionCall() { delete args_; }
@@ -259,22 +366,42 @@ class ASTFunctionCall : public ASTNode {
     out << ")";
   }
 
-  virtual void run(Runner *runner) const {}
+  virtual void run(Runner *runner, void *out) const {
+    void *lambdaAddress = std::get<void *>(runner->variables[name_]);
+    std::cout << "Calling " << name_ << " @ " << lambdaAddress << std::endl;
+
+  if(lambdaAddress == nullptr) {
+    throw std::runtime_error("Unknown function: " + name_);
+  }
+
+    ASTLambda *lambda = *(ASTLambda **)lambdaAddress;
+
+    int i = 0;
+    for (auto arg : lambda->args_->nodes_) {
+      void *variableAddress;
+      arg->run(runner, &variableAddress);
+      std::cout << "ARG: " << variableAddress << std::endl;
+      i++;
+    }
+
+    lambda->body_->run(runner, out);
+  }
 
  private:
   std::string name_;
-  ASTNode *args_;
+  ASTNodeList *args_;
 };
 
 class Parser {
  public:
   Parser(std::istream &in) : in_(in) {}
 
-  ASTNode *parse() {
-    auto result = parseGlobalBody();
+  ASTNode *parse(bool standalone = true) {
+    ASTNodeList *result = parseGlobalBody();
     if (in_.peek() != EOF) {
       throw std::runtime_error("Unexpected token");
     }
+    result->add((new ASTFunctionCall("main", new ASTNodeList())));
     return result;
   }
 
@@ -347,11 +474,28 @@ class Parser {
     if (in_.peek() == EOF) {
       throw std::runtime_error("Unexpected EOF");
     }
+    std::streampos oldpos = in_.tellg();
+    std::string name = parseIdentifier();
+    skipWhitespace();
+    if (in_.peek() == '<') {
+      in_.get();
+      skipWhitespace();
+      ASTNode *type = parseType();
+      skipWhitespace();
+      if (in_.peek() != '>') {
+        throw std::runtime_error("Expected >");
+      }
+      in_.get();
+      skipWhitespace();
+      return new ASTTemplate(type, name);
+    }
+    std::streampos newpos = in_.tellg();
+    in_.seekg(oldpos);
+
     if (in_.peek() == '*') {
       in_.get();
       return new ASTPointer(parseType());
-    }
-    if (in_.peek() == '[') {
+    } else if (in_.peek() == '[') {
       in_.get();
       if (in_.peek() == ']') {
         in_.get();
@@ -363,30 +507,16 @@ class Parser {
       }
       return new ASTArray(parseType(), size);
     }
-    if (in_.peek() == '<') {
-      in_.get();
-      std::string name;
-      while (in_.peek() != '>') {
-        name += in_.get();
-      }
-      in_.get();
-      return new ASTTemplate(parseType(), name);
-    }
-    std::string name;
-    int _p = 0;
-    while (isValidIdentifierChar(in_.peek(), _p)) {
-      name += in_.get();
-      _p++;
-    }
+    in_.seekg(newpos);
     return new ASTType(name);
   }
 
-  ASTNode *parseGlobalBody() {
+  ASTNodeList *parseGlobalBody() {
     auto result = parseBody(false);
     return result;
   }
 
-  ASTNode *parseBody(bool errorOnEOF = true) {
+  ASTNodeList *parseBody(bool errorOnEOF = true) {
     ASTNodeList *result = new ASTNodeList();
     while (in_.peek() != '}') {
       if (in_.peek() == EOF) {
@@ -422,7 +552,8 @@ class Parser {
         }
         _p++;
       }
-      if (_p == 0 && expressionType == EXPRESSION) expressionType = VAR_ASSIGNMENT;
+      if (_p == 0 && expressionType == EXPRESSION)
+        expressionType = VAR_ASSIGNMENT;
       in_.seekg(oldpos);
 
       if (expressionType == VAR_DECLARATION) {
@@ -471,7 +602,7 @@ class Parser {
     return new ASTFunctionArg(type, name);
   }
 
-  ASTNode *parseFunctionArgs() {
+  ASTNodeList *parseFunctionArgs() {
     ASTNodeList *result = new ASTNodeList();
     while (in_.peek() != '{') {
       result->add(parseFunctionArg());
@@ -491,7 +622,7 @@ class Parser {
       throw std::runtime_error("Expected '%'");
     }
     skipWhitespace();
-    ASTNode *args = parseFunctionArgs();
+    ASTNodeList *args = parseFunctionArgs();
     if (in_.get() != '{') {
       throw std::runtime_error("Expected '{'");
     }
@@ -585,16 +716,6 @@ class Parser {
   std::istream &in_;
 };
 
-class Runner {
- public:
-  Runner(ASTNode *ast) : ast_(ast) {}
-
-  void run() { ast_->run(this); }
-
- private:
-  ASTNode *ast_;
-};
-
 int main() {
   std::ifstream file("tests/initial.wha");
   std::istream &code = static_cast<std::istream &>(file);
@@ -604,4 +725,11 @@ int main() {
 
   ast->print(std::cout);
   std::cout << std::endl;
+
+  int exitCode = 0;
+
+  Runner runner(ast);
+  runner.run(&exitCode);
+
+  return exitCode;
 }
