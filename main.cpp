@@ -5,10 +5,13 @@
 #include <string>
 #include <vector>
 
+class Runner;
+
 class ASTNode {
  public:
   virtual ~ASTNode() {}
   virtual void print(std::ostream &out) const = 0;
+  virtual void run(Runner *runner) const = 0;
 };
 
 class ASTNodeList : public ASTNode {
@@ -27,6 +30,12 @@ class ASTNodeList : public ASTNode {
     }
   }
 
+  virtual void run(Runner *runner) const {
+    for (auto node : nodes_) {
+      node->run(runner);
+    }
+  }
+
  private:
   std::vector<ASTNode *> nodes_;
 };
@@ -36,6 +45,8 @@ class ASTType : public ASTNode {
   ASTType(const std::string &name) : name_(name) {}
 
   virtual void print(std::ostream &out) const { out << name_; }
+
+  virtual void run(Runner *runner) const {}
 
  private:
   std::string name_;
@@ -49,6 +60,8 @@ class ASTPointer : public ASTNode {
     type_->print(out);
     out << ")";
   }
+
+  virtual void run(Runner *runner) const {}
 
  private:
   ASTNode *type_;
@@ -64,6 +77,8 @@ class ASTArray : public ASTNode {
     type_->print(out);
     out << ")";
   }
+
+  virtual void run(Runner *runner) const {}
 
  private:
   ASTNode *type_;
@@ -81,6 +96,8 @@ class ASTTemplate : public ASTNode {
     type_->print(out);
   }
 
+  virtual void run(Runner *runner) const {}
+
  private:
   ASTNode *type_;
   std::string name_;
@@ -96,6 +113,8 @@ class ASTFunctionArg : public ASTNode {
     type_->print(out);
   }
 
+  virtual void run(Runner *runner) const {}
+
  private:
   ASTNode *type_;
   std::string name_;
@@ -107,6 +126,8 @@ class ASTNumber : public ASTNode {
 
   virtual void print(std::ostream &out) const { out << value_; }
 
+  virtual void run(Runner *runner) const {}
+
  private:
   int value_;
 };
@@ -115,6 +136,8 @@ class ASTString : public ASTNode {
   ASTString(const std::string &value) : value_(value) {}
 
   virtual void print(std::ostream &out) const { out << '"' << value_ << '"'; }
+
+  virtual void run(Runner *runner) const {}
 
  private:
   std::string value_;
@@ -138,6 +161,8 @@ class ASTBinaryOp : public ASTNode {
     out << ")";
   }
 
+  virtual void run(Runner *runner) const {}
+
  private:
   std::string op_;
   ASTNode *left_;
@@ -157,6 +182,8 @@ class ASTLambda : public ASTNode {
     body_->print(out);
     out << "}";
   }
+
+  virtual void run(Runner *runner) const {}
 
  private:
   ASTNode *body_;
@@ -180,6 +207,8 @@ class ASTVariableDecl : public ASTNode {
     out << ";";
   }
 
+  virtual void run(Runner *runner) const {}
+
  private:
   std::string name_;
   ASTNode *type_;
@@ -191,8 +220,30 @@ class ASTVariable : public ASTNode {
 
   virtual void print(std::ostream &out) const { out << name_; }
 
+  virtual void run(Runner *runner) const {}
+
  private:
   std::string name_;
+};
+class ASTVariableAssign : public ASTNode {
+ public:
+  ASTVariableAssign(const std::string &name, ASTNode *value)
+      : name_(name), value_(value) {}
+
+  virtual ~ASTVariableAssign() { delete value_; }
+
+  virtual void print(std::ostream &out) const {
+    out << name_;
+    out << " = ";
+    value_->print(out);
+    out << ";";
+  }
+
+  virtual void run(Runner *runner) const {}
+
+ private:
+  std::string name_;
+  ASTNode *value_;
 };
 class ASTFunctionCall : public ASTNode {
  public:
@@ -207,6 +258,8 @@ class ASTFunctionCall : public ASTNode {
     args_->print(out);
     out << ")";
   }
+
+  virtual void run(Runner *runner) const {}
 
  private:
   std::string name_;
@@ -286,9 +339,6 @@ class Parser {
     } else {
       value = new ASTNumber(0);
     }
-    if (in_.get() != ';') {
-      throw std::runtime_error("Expected ';'");
-    }
     return new ASTVariableDecl(name, type, value);
   }
 
@@ -332,35 +382,71 @@ class Parser {
   }
 
   ASTNode *parseGlobalBody() {
-    auto result = new ASTNodeList();
-    while (in_.peek() != EOF) {
-      skipWhitespace();
-      result->add(parseVariableDecl());
-      skipWhitespace();
-    }
+    auto result = parseBody(false);
     return result;
   }
 
-  ASTNode *parseBody() {
+  ASTNode *parseBody(bool errorOnEOF = true) {
     ASTNodeList *result = new ASTNodeList();
     while (in_.peek() != '}') {
       if (in_.peek() == EOF) {
-        throw std::runtime_error("Unexpected EOF");
+        if (errorOnEOF) {
+          throw std::runtime_error("Unexpected EOF");
+        } else {
+          break;
+        }
       }
       skipWhitespace();
 
-      // debug
       std::streampos oldpos = in_.tellg();
-      std::string line = readLine();
-      std::cout << "line: " << line << std::endl;
-      in_.seekg(oldpos);
-      // end debug
 
-      result->add(parseExpression());
-      if (in_.peek() != ';') {
-        throw std::runtime_error("Expected ';'");
+      enum {
+        VAR_DECLARATION = 1,
+        VAR_ASSIGNMENT = 2,
+        EXPRESSION = 3,
+      } expressionType = EXPRESSION;
+
+      int _p = 0;
+      while (in_.peek() != ';') {
+        skipWhitespace();
+        try {
+          parseExpression();
+        } catch (std::runtime_error &e) {
+          expressionType = VAR_DECLARATION;
+          break;
+        }
+        skipWhitespace();
+        if (in_.peek() == '=') {
+          expressionType = VAR_DECLARATION;
+          break;
+        }
+        _p++;
       }
-      in_.get();
+      if (_p == 0 && expressionType == EXPRESSION) expressionType = VAR_ASSIGNMENT;
+      in_.seekg(oldpos);
+
+      if (expressionType == VAR_DECLARATION) {
+        result->add(parseVariableDecl());
+        if (in_.get() != ';') {
+          throw std::runtime_error("Expected ';'");
+        }
+      } else if (expressionType == VAR_ASSIGNMENT) {
+        std::string name = parseIdentifier();
+        if (in_.get() != '=') {
+          throw std::runtime_error("Expected '='");
+        }
+        skipWhitespace();
+        ASTNode *value = parseExpression();
+        if (in_.get() != ';') {
+          throw std::runtime_error("Expected ';'");
+        }
+        result->add(new ASTVariableAssign(name, value));
+      } else {
+        result->add(parseExpression());
+        if (in_.get() != ';') {
+          throw std::runtime_error("Expected ';'");
+        }
+      }
 
       skipWhitespace();
     }
@@ -450,10 +536,16 @@ class Parser {
     }
     skipWhitespace();
     while (isValidOperatorChar(in_.peek())) {
+      std::streampos oldpos = in_.tellg();
       std::string op = parseOperator();
-      skipWhitespace();
-      auto right = parseExpression();
-      result = new ASTBinaryOp(op, result, right);
+      if (op != "=") {
+        skipWhitespace();
+        auto right = parseExpression();
+        result = new ASTBinaryOp(op, result, right);
+      } else {
+        in_.seekg(oldpos);
+        break;
+      }
     }
     return result;
   }
@@ -491,6 +583,16 @@ class Parser {
   }
 
   std::istream &in_;
+};
+
+class Runner {
+ public:
+  Runner(ASTNode *ast) : ast_(ast) {}
+
+  void run() { ast_->run(this); }
+
+ private:
+  ASTNode *ast_;
 };
 
 int main() {

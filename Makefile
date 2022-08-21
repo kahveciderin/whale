@@ -12,6 +12,9 @@ SRCS = $(wildcard *.cpp)
 main: $(SRCS:.cpp=.o)
 	$(CC) $(CFLAGS) -o $@ $^
 
+run: main
+	./main
+
 %.o: %.cpp
 	$(CC) $(CFLAGS) -c $< -o $@
 

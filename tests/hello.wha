@@ -1,3 +1,3 @@
-fun<void> main(){
-    print("Hello World")
-}
+<void>fun main = %{
+    print("Hello World");
+};
