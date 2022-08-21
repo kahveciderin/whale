@@ -1,3 +1,8 @@
 fun<void> main = %{
-    print("Hello World");
+    *char text = "Hello, World!";
+    i32 variable = 200;
+    print(text);
+    text = "np";
+    print(text);
+    printint(variable == 200);
 };

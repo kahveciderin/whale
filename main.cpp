@@ -15,45 +15,6 @@ class ASTNode {
   virtual void run(Runner *runner, void *out = nullptr) const = 0;
 };
 
-class Runner {
- public:
-  std::map<std::string, std::pair<ASTNode *, void *>> variables;
-  Runner(ASTNode *ast) : ast_(ast) {}
-
-  void run(void *out) { ast_->run(this, out); }
-  void *alloc(int size) { return malloc(size); }
-
- private:
-  ASTNode *ast_;
-};
-
-class ASTNodeList : public ASTNode {
- public:
-  virtual ~ASTNodeList() {
-    for (auto node : nodes_) {
-      delete node;
-    }
-  }
-
-  void add(ASTNode *node) { nodes_.push_back(node); }
-
-  virtual void print(std::ostream &out) const {
-    for (auto node : nodes_) {
-      node->print(out);
-    }
-  }
-
-  virtual void run(Runner *runner, void *out) const {
-    for (auto node : nodes_) {
-      node->run(runner);
-    }
-  }
-
-  std::vector<ASTNode *> nodes_;
-
- private:
-};
-
 class ASTType : public ASTNode {
  public:
   ASTType(const std::string &name) : name_(name) {}
@@ -83,6 +44,124 @@ class ASTType : public ASTNode {
  private:
   std::string name_;
 };
+
+class ASTNodeList : public ASTNode {
+ public:
+  ASTNodeList(const std::vector<ASTNode *> &nodes) : nodes_(nodes) {}
+  ASTNodeList() {}
+
+  virtual ~ASTNodeList() {
+    for (auto node : nodes_) {
+      delete node;
+    }
+  }
+
+  void add(ASTNode *node) { nodes_.push_back(node); }
+
+  virtual void print(std::ostream &out) const {
+    for (auto node : nodes_) {
+      node->print(out);
+    }
+  }
+
+  virtual void run(Runner *runner, void *out) const {
+    int trash_ = 0;
+    for (auto node : nodes_) {
+      node->run(runner, &trash_);
+    }
+  }
+
+  std::vector<ASTNode *> nodes_;
+
+ private:
+};
+
+class ASTTemplate : public ASTNode {
+ public:
+  ASTTemplate(ASTNode *type, const std::string &name)
+      : type_(type), name_(name) {}
+
+  virtual void print(std::ostream &out) const {
+    out << "TEMPLATE(";
+    out << name_;
+    out << ", ";
+    type_->print(out);
+    out << ")";
+  }
+
+  virtual void run(Runner *runner, void *out) const {
+    *(int *)out = sizeof(void *);  // templates always have a pointer size
+  }
+
+ private:
+  ASTNode *type_;
+  std::string name_;
+};
+class ASTLambda : public ASTNode {
+ public:
+  ASTLambda(ASTNodeList *args, ASTNode *body) : args_(args), body_(body) {}
+
+  virtual ~ASTLambda() { delete body_; }
+
+  virtual void print(std::ostream &out) const {
+    out << "%(";
+    args_->print(out);
+    out << "){";
+    body_->print(out);
+    out << "}";
+  }
+
+  virtual void run(Runner *runner, void *out) const {
+    *(const ASTLambda **)out = this;
+  }
+
+  ASTNodeList *args_;
+  ASTNode *body_;
+
+ private:
+};
+
+class ASTNativeFunction : public ASTNode {
+ public:
+  ASTNativeFunction(void (*function)(Runner *)) : function_(function) {}
+
+  virtual ~ASTNativeFunction() {}
+
+  virtual void print(std::ostream &out) const {
+    out << "native @ " << function_;
+  }
+
+  virtual void run(Runner *runner, void *out) const { function_(runner); }
+
+ private:
+  void (*function_)(Runner *);
+};
+
+class Runner {
+ public:
+  std::map<std::string, std::pair<ASTNode *, void *>> variables;
+  Runner(ASTNode *ast) : ast_(ast) {}
+
+  void run(void *out) { ast_->run(this, out); }
+  void *alloc(int size) { return malloc(size); }
+
+  void generateFunction(std::string name, ASTNodeList *args,
+                        void (*body)(Runner *),
+                        ASTNode *ret = new ASTType("void")) {
+    ASTLambda *newLambda =
+        new ASTLambda(args, new ASTNodeList({new ASTNativeFunction(body)}));
+    ASTTemplate *newTemplate = new ASTTemplate(ret, "fun");
+    int bytes;
+    newTemplate->run(this, &bytes);
+    void *ptr = this->alloc(bytes);
+    this->variables[name] = std::make_pair(newTemplate, ptr);
+    newLambda->run(this, ptr);
+  }
+
+ private:
+  ASTNode *ast_;
+};
+
 class ASTPointer : public ASTNode {
  public:
   ASTPointer(ASTNode *type) : type_(type) {}
@@ -123,27 +202,6 @@ class ASTArray : public ASTNode {
   ASTNode *type_;
   ASTNode *size_;
 };
-class ASTTemplate : public ASTNode {
- public:
-  ASTTemplate(ASTNode *type, const std::string &name)
-      : type_(type), name_(name) {}
-
-  virtual void print(std::ostream &out) const {
-    out << "TEMPLATE(";
-    out << name_;
-    out << ", ";
-    type_->print(out);
-    out << ")";
-  }
-
-  virtual void run(Runner *runner, void *out) const {
-    *(int *)out = sizeof(void *);  // templates always have a pointer size
-  }
-
- private:
-  ASTNode *type_;
-  std::string name_;
-};
 class ASTFunctionArg : public ASTNode {
  public:
   ASTFunctionArg(ASTNode *type, const std::string &name)
@@ -159,8 +217,6 @@ class ASTFunctionArg : public ASTNode {
     int bytes;
     type_->run(runner, &bytes);
     void *ptr = runner->alloc(bytes);
-    std::cout << "Allocated " << bytes << " bytes for " << name_ << " on "
-              << ptr << std::endl;
     runner->variables[name_] = std::make_pair(type_, ptr);
 
     *(void **)out = ptr;
@@ -177,7 +233,9 @@ class ASTNumber : public ASTNode {
 
   virtual void print(std::ostream &out) const { out << value_; }
 
-  virtual void run(Runner *runner, void *out) const { *(int *)out = value_; }
+  virtual void run(Runner *runner, void *out) const {
+    *(int *)out = value_;
+  }
 
  private:
   int value_;
@@ -188,7 +246,9 @@ class ASTString : public ASTNode {
 
   virtual void print(std::ostream &out) const { out << '"' << value_ << '"'; }
 
-  virtual void run(Runner *runner, void *out) const {}
+  virtual void run(Runner *runner, void *out) const {
+    *(const char **)out = value_.c_str();
+  }
 
  private:
   std::string value_;
@@ -263,30 +323,6 @@ class ASTBinaryOp : public ASTNode {
   ASTNode *right_;
 };
 
-class ASTLambda : public ASTNode {
- public:
-  ASTLambda(ASTNodeList *args, ASTNode *body) : args_(args), body_(body) {}
-
-  virtual ~ASTLambda() { delete body_; }
-
-  virtual void print(std::ostream &out) const {
-    out << "%(";
-    args_->print(out);
-    out << "){";
-    body_->print(out);
-    out << "}";
-  }
-
-  virtual void run(Runner *runner, void *out) const {
-    std::cout << "LAMBDA address: " << this << std::endl;
-    *(const ASTLambda **)out = this;
-  }
-
-  ASTNodeList *args_;
-  ASTNode *body_;
-
- private:
-};
 class ASTVariableDecl : public ASTNode {
  public:
   ASTVariableDecl(const std::string &name, ASTNode *type, ASTNode *value)
@@ -309,8 +345,6 @@ class ASTVariableDecl : public ASTNode {
     int bytes;
     type_->run(runner, &bytes);
     void *ptr = runner->alloc(bytes);
-    std::cout << "Allocated " << bytes << " bytes for " << name_ << " on "
-              << ptr << std::endl;
     runner->variables[name_] = std::make_pair(type_, ptr);
 
     value_->run(runner, ptr);
@@ -327,7 +361,15 @@ class ASTVariable : public ASTNode {
 
   virtual void print(std::ostream &out) const { out << name_; }
 
-  virtual void run(Runner *runner, void *out) const {}
+  virtual void run(Runner *runner, void *out) const {
+    auto it = runner->variables[name_];
+    if (it.first == nullptr) {
+      throw std::runtime_error("Variable " + name_ + " not found");
+    }
+    if (out != nullptr) {
+      *(unsigned long *)out = (unsigned long)*(unsigned long int **)it.second;
+    }
+  }
 
  private:
   std::string name_;
@@ -346,7 +388,13 @@ class ASTVariableAssign : public ASTNode {
     out << ";";
   }
 
-  virtual void run(Runner *runner, void *out) const {}
+  virtual void run(Runner *runner, void *out) const {
+    auto it = runner->variables[name_];
+    if (it.first == nullptr) {
+      throw std::runtime_error("Variable " + name_ + " not found");
+    }
+    value_->run(runner, it.second);
+  }
 
  private:
   std::string name_;
@@ -367,12 +415,11 @@ class ASTFunctionCall : public ASTNode {
   }
 
   virtual void run(Runner *runner, void *out) const {
-    void *lambdaAddress = std::get<void *>(runner->variables[name_]);
-    std::cout << "Calling " << name_ << " @ " << lambdaAddress << std::endl;
+    void *lambdaAddress = runner->variables[name_].second;
 
-  if(lambdaAddress == nullptr) {
-    throw std::runtime_error("Unknown function: " + name_);
-  }
+    if (lambdaAddress == nullptr) {
+      throw std::runtime_error("Unknown function: " + name_);
+    }
 
     ASTLambda *lambda = *(ASTLambda **)lambdaAddress;
 
@@ -380,7 +427,7 @@ class ASTFunctionCall : public ASTNode {
     for (auto arg : lambda->args_->nodes_) {
       void *variableAddress;
       arg->run(runner, &variableAddress);
-      std::cout << "ARG: " << variableAddress << std::endl;
+      this->args_->nodes_[i]->run(runner, variableAddress);
       i++;
     }
 
@@ -399,7 +446,7 @@ class Parser {
   ASTNode *parse(bool standalone = true) {
     ASTNodeList *result = parseGlobalBody();
     if (in_.peek() != EOF) {
-      throw std::runtime_error("Unexpected token");
+      throw std::runtime_error("Unexpected token : EOF expected");
     }
     result->add((new ASTFunctionCall("main", new ASTNodeList())));
     return result;
@@ -418,10 +465,10 @@ class Parser {
       return isalnum(i) || i == '_';
     }
   }
-  bool isValidOperatorChar(char i, int pos = 0) {
+  bool isValidOperatorChar(char i, int pos = 0, bool shouldIncludeSemicolon = false) {
     return i == '+' || i == '-' || i == '*' || i == '/' || i == '%' ||
            i == '^' || i == '&' || i == '|' || i == '!' || i == '~' ||
-           i == '<' || i == '>' || i == '=' || i == '?' || i == ':';
+           i == '<' || i == '>' || i == '=' || i == '?' || i == ':' || (shouldIncludeSemicolon && i == ';');
   }
   std::string parseIdentifier() {
     skipWhitespace();
@@ -434,11 +481,11 @@ class Parser {
     skipWhitespace();
     return result;
   }
-  std::string parseOperator() {
+  std::string parseOperator(bool shouldIncludeSemicolon = false) {
     skipWhitespace();
     std::string result;
     int _p = 0;
-    while (isValidOperatorChar(in_.peek(), _p)) {
+    while (isValidOperatorChar(in_.peek(), _p, shouldIncludeSemicolon)) {
       result += in_.get();
       _p++;
     }
@@ -457,6 +504,7 @@ class Parser {
   ASTNode *parseVariableDecl() {
     ASTNode *type = parseType();
     std::string name = parseIdentifier();
+    skipWhitespace();
     ASTNode *value;
     if (in_.peek() == '=') {
       in_.get();
@@ -530,30 +578,44 @@ class Parser {
 
       std::streampos oldpos = in_.tellg();
 
+      std::string line = "";
+      while (in_.peek() != ';') {
+        line += in_.get();
+      }
+      in_.seekg(oldpos);
+
       enum {
         VAR_DECLARATION = 1,
         VAR_ASSIGNMENT = 2,
         EXPRESSION = 3,
       } expressionType = EXPRESSION;
 
-      int _p = 0;
-      while (in_.peek() != ';') {
+      try {
+        parseType();
         skipWhitespace();
-        try {
-          parseExpression();
-        } catch (std::runtime_error &e) {
-          expressionType = VAR_DECLARATION;
-          break;
-        }
+        std::string identifier = parseIdentifier();
         skipWhitespace();
-        if (in_.peek() == '=') {
+        std::string nextOperator = parseOperator();
+        if ((nextOperator == "=" || nextOperator == ";") && identifier != "") {
           expressionType = VAR_DECLARATION;
-          break;
         }
-        _p++;
+      } catch (std::runtime_error &e) {
       }
-      if (_p == 0 && expressionType == EXPRESSION)
-        expressionType = VAR_ASSIGNMENT;
+
+      in_.seekg(oldpos);
+
+      if (expressionType == EXPRESSION) {
+        try {
+          parseIdentifier();
+          skipWhitespace();
+          std::string nextOperator = parseOperator();
+          if (nextOperator == "=") {
+            expressionType = VAR_ASSIGNMENT;
+          }
+        } catch (std::runtime_error &e) {
+        }
+      }
+
       in_.seekg(oldpos);
 
       if (expressionType == VAR_DECLARATION) {
@@ -709,7 +771,7 @@ class Parser {
       in_.get();
       return new ASTString(value);
     } else {
-      throw std::runtime_error("Unexpected token");
+      throw std::runtime_error("Unexpected token: ");
     }
   }
 
@@ -723,12 +785,25 @@ int main() {
   Parser parser(code);
   auto ast = parser.parse();
 
-  ast->print(std::cout);
-  std::cout << std::endl;
-
   int exitCode = 0;
 
   Runner runner(ast);
+
+  runner.generateFunction(
+      "print",
+      new ASTNodeList(
+          {new ASTFunctionArg(new ASTPointer(new ASTType("char")), "str")}),
+      [](Runner *runner) {
+        std::cout << *(char **)runner->variables["str"].second << std::endl;
+      });
+  runner.generateFunction(
+      "printint",
+      new ASTNodeList(
+          {new ASTFunctionArg(new ASTPointer(new ASTType("i32")), "number")}),
+      [](Runner *runner) {
+        std::cout << *(int *)runner->variables["number"].second << std::endl;
+      });
+
   runner.run(&exitCode);
 
   return exitCode;
