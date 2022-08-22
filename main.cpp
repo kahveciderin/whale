@@ -13,7 +13,14 @@ class Runner;
 class ASTNode {
  public:
   virtual ~ASTNode() {}
-  virtual void print(std::ostream &out) const = 0;
+  virtual void print(std::ostream &out, int level = 0) const = 0;
+  std::string indent(int level) const {
+    std::string s;
+    for (int i = 0; i < level; ++i) {
+      s += "  ";
+    }
+    return s;
+  }
   virtual void run(Runner *runner, void *out = nullptr) const = 0;
 };
 
@@ -21,7 +28,9 @@ class ASTType : public ASTNode {
  public:
   ASTType(const std::string &name) : name_(name) {}
 
-  virtual void print(std::ostream &out) const { out << name_; }
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Type " << name_ << std::endl;
+  }
 
   virtual void run(Runner *runner, void *out) const {
     if (name_ == "i32") {
@@ -95,9 +104,10 @@ class ASTNodeList : public ASTNode {
 
   void add(ASTNode *node) { nodes_.push_back(node); }
 
-  virtual void print(std::ostream &out) const {
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "NodeList:\n";
     for (auto node : nodes_) {
-      node->print(out);
+      node->print(out, level + 1);
     }
   }
 
@@ -125,12 +135,9 @@ class ASTTemplate : public ASTNode {
   ASTTemplate(ASTNode *type, const std::string &name)
       : type_(type), name_(name) {}
 
-  virtual void print(std::ostream &out) const {
-    out << "TEMPLATE(";
-    out << name_;
-    out << ", ";
-    type_->print(out);
-    out << ")";
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Template: " << name_ << std::endl;
+    type_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
@@ -148,13 +155,11 @@ class ASTLambda : public ASTNode {
 
   virtual ~ASTLambda() { delete body_; }
 
-  virtual void print(std::ostream &out) const {
-    out << "%(";
-    args_->print(out);
-    out << "){";
-    body_->print(out);
-    out << "} -> ";
-    type_->print(out);
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Lambda: " << std::endl;
+    args_->print(out, level + 1);
+    body_->print(out, level + 1);
+    type_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
@@ -174,8 +179,8 @@ class ASTNativeFunction : public ASTNode {
 
   virtual ~ASTNativeFunction() {}
 
-  virtual void print(std::ostream &out) const {
-    out << "native @ " << function_;
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "native @ " << function_;
   }
 
   virtual void run(Runner *runner, void *out) const { function_(runner); }
@@ -231,10 +236,10 @@ void Runner::generateFunction(std::string name, ASTNodeList *args,
 }
 void Runner::gc() {
   std::vector<RunnerVariable *> newVars;
-  for(auto var : variables){
-    if(var->depth_ <= this->_depth){
+  for (auto var : variables) {
+    if (var->depth_ <= this->_depth) {
       newVars.push_back(var);
-    }else{
+    } else {
       // std::cout << "GC'd " << var->name_ << std::endl;
       // free(var->value_);
       delete var;
@@ -247,10 +252,9 @@ class ASTPointer : public ASTNode {
  public:
   ASTPointer(ASTNode *type) : type_(type) {}
 
-  virtual void print(std::ostream &out) const {
-    out << "POINTER(";
-    type_->print(out);
-    out << ")";
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Pointer: " << std::endl;
+    type_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
@@ -264,12 +268,10 @@ class ASTArray : public ASTNode {
  public:
   ASTArray(ASTNode *type, ASTNode *size) : type_(type), size_(size) {}
 
-  virtual void print(std::ostream &out) const {
-    out << "ARRAY(";
-    size_->print(out);
-    out << ", ";
-    type_->print(out);
-    out << ")";
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Array: " << std::endl;
+    type_->print(out, level + 1);
+    size_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
@@ -288,10 +290,9 @@ class ASTFunctionArg : public ASTNode {
   ASTFunctionArg(ASTNode *type, const std::string &name)
       : type_(type), name_(name) {}
 
-  virtual void print(std::ostream &out) const {
-    out << name_;
-    out << ":";
-    type_->print(out);
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Argument: " << name_ << std::endl;
+    type_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
@@ -308,7 +309,9 @@ class ASTNumber : public ASTNode {
  public:
   ASTNumber(int value) : value_(value) {}
 
-  virtual void print(std::ostream &out) const { out << value_; }
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Number: " << value_ << std::endl;
+  }
 
   virtual void run(Runner *runner, void *out) const { *(int *)out = value_; }
 
@@ -319,7 +322,9 @@ class ASTString : public ASTNode {
  public:
   ASTString(const std::string &value) : value_(value) {}
 
-  virtual void print(std::ostream &out) const { out << '"' << value_ << '"'; }
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "String: \"" << value_ << "\"" << std::endl;
+  }
 
   virtual void run(Runner *runner, void *out) const {
     *(const char **)out = value_.c_str();
@@ -339,12 +344,10 @@ class ASTBinaryOp : public ASTNode {
     delete right_;
   }
 
-  virtual void print(std::ostream &out) const {
-    out << "(";
-    left_->print(out);
-    out << " " << op_ << " ";
-    right_->print(out);
-    out << ")";
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "BinaryOp: " << op_ << std::endl;
+    left_->print(out, level + 1);
+    right_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
@@ -408,12 +411,10 @@ class ASTVariableDecl : public ASTNode {
     delete value_;
   }
 
-  virtual void print(std::ostream &out) const {
-    type_->print(out);
-    out << " " << name_;
-    out << " = ";
-    value_->print(out);
-    out << ";";
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "VariableDecl: " << name_ << std::endl;
+    type_->print(out, level + 1);
+    value_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
@@ -430,7 +431,9 @@ class ASTVariable : public ASTNode {
  public:
   ASTVariable(const std::string &name) : name_(name) {}
 
-  virtual void print(std::ostream &out) const { out << name_; }
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Variable: " << name_ << std::endl;
+  }
 
   virtual void run(Runner *runner, void *out) const {
     auto it = runner->getVariable(name_)->value_;
@@ -450,11 +453,9 @@ class ASTVariableAssign : public ASTNode {
 
   virtual ~ASTVariableAssign() { delete value_; }
 
-  virtual void print(std::ostream &out) const {
-    out << name_;
-    out << " = ";
-    value_->print(out);
-    out << ";";
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "VariableAssign: " << name_ << std::endl;
+    value_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
@@ -474,15 +475,12 @@ class ASTFunctionCall : public ASTNode {
 
   virtual ~ASTFunctionCall() { delete args_; }
 
-  virtual void print(std::ostream &out) const {
-    out << name_;
-    out << "(";
-    args_->print(out);
-    out << ")";
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "FunctionCall: " << name_ << std::endl;
+    args_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
-
     void *lambdaAddress = runner->getVariable(name_)->value_;
 
     ASTLambda *lambda = *(ASTLambda **)lambdaAddress;
@@ -511,7 +509,6 @@ class ASTFunctionCall : public ASTNode {
 
     runner->_return = false;
 
-
     runner->gc();
   }
 
@@ -530,14 +527,12 @@ class ASTIf : public ASTNode {
     delete elseBody_;
   }
 
-  virtual void print(std::ostream &out) const {
-    out << "if (";
-    condition_->print(out);
-    out << ") ";
-    body_->print(out);
-    if (elseBody_ != nullptr) {
-      out << " else ";
-      elseBody_->print(out);
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "If: " << std::endl;
+    condition_->print(out, level + 1);
+    body_->print(out, level + 1);
+    if(elseBody_ != nullptr) {
+      elseBody_->print(out, level + 1);
     }
   }
 
@@ -566,11 +561,10 @@ class ASTWhile : public ASTNode {
     delete body_;
   }
 
-  virtual void print(std::ostream &out) const {
-    out << "while (";
-    condition_->print(out);
-    out << ") ";
-    body_->print(out);
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "While: " << std::endl;
+    condition_->print(out, level + 1);
+    body_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
@@ -592,10 +586,9 @@ class ASTReturn : public ASTNode {
 
   virtual ~ASTReturn() { delete value_; }
 
-  virtual void print(std::ostream &out) const {
-    out << "return(";
-    value_->print(out);
-    out << ")";
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Return: " << std::endl;
+    value_->print(out, level + 1);
   }
 
   virtual void run(Runner *runner, void *out) const {
@@ -1020,7 +1013,6 @@ int main() {
   auto ast = parser.parse();
 
   ast->print(std::cout);
-  std::cout << std::endl;
 
   int exitCode = 0;
 
@@ -1060,9 +1052,9 @@ int main() {
 
     std::vector<RunnerVariable *> vars;
     for (int i = runner->variables.size() - 1; i >= 0; i--) {
-        if (runner->variables[i]->depth_ <= runner->_depth) {
-          vars.push_back(runner->variables[i]);
-        }
+      if (runner->variables[i]->depth_ <= runner->_depth) {
+        vars.push_back(runner->variables[i]);
+      }
     }
 
     // order vars by depth
@@ -1072,7 +1064,8 @@ int main() {
               });
 
     for (auto &var : vars) {
-      std::cout << var->name_ << " @ " << var->depth_ << " (" << var->value_ << ") = " << *(int *)var->value_ << std::endl;
+      std::cout << var->name_ << " @ " << var->depth_ << " (" << var->value_
+                << ") = " << *(int *)var->value_ << std::endl;
     }
   });
 
