@@ -1,12 +1,13 @@
 fun fib = %n:i32{
-        printintl("fib enter: ", n);
-        vardump();
+        # printintl("fib enter: ", n);
+        # vardump();
         if n <= 2 {
             return 1;
         };
         
-        printintl("n - 1 = ", n - 1);
-        printintl("n - 2 = ", n - 2);
+        # printintl("n - 1 = ", n - 1);
+        # printintl("n - 2 = ", n - 2);
+        printint(n-1);
         return fib(n-1) + fib(n-2);
     } -> i32;
 

@@ -531,7 +531,7 @@ class ASTIf : public ASTNode {
     out << this->indent(level) << "If: " << std::endl;
     condition_->print(out, level + 1);
     body_->print(out, level + 1);
-    if(elseBody_ != nullptr) {
+    if (elseBody_ != nullptr) {
       elseBody_->print(out, level + 1);
     }
   }
@@ -617,9 +617,17 @@ class Parser {
   }
 
  private:
-  void skipWhitespace() {
-    while (isspace(in_.peek())) {
+  void skipComment() {
+    while (in_.peek() != '\n' && in_.peek() != EOF) {
       in_.get();
+    }
+  }
+  void skipWhitespace() {
+    while (isspace(in_.peek()) || in_.peek() == '#') {
+      char c_ = in_.get();
+      if(c_ == '#') {
+        skipComment();
+      }
     }
   }
   bool isValidIdentifierChar(char i, int pos = 0) {
