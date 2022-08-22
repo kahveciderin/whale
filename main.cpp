@@ -235,7 +235,7 @@ void Runner::gc() {
     if(var->depth_ <= this->_depth){
       newVars.push_back(var);
     }else{
-      std::cout << "GC'd " << var->name_ << std::endl;
+      // std::cout << "GC'd " << var->name_ << std::endl;
       // free(var->value_);
       delete var;
     }
