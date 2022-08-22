@@ -22,7 +22,8 @@ class ASTNode {
     }
     return s;
   }
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out = nullptr) const = 0;
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out = nullptr) const = 0;
 };
 
 class ASTType : public ASTNode {
@@ -33,7 +34,8 @@ class ASTType : public ASTNode {
     out << this->indent(level) << "Type " << name_ << std::endl;
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     if (name_ == "i32") {
       *(int *)out = sizeof(int);
     } else if (name_ == "i64") {
@@ -131,7 +133,8 @@ class ASTNodeList : public ASTNode {
     }
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     RunnerStackFrame newStackFrame(stackFrame);
 
     unsigned long trash_ = 0;
@@ -160,7 +163,8 @@ class ASTTemplate : public ASTNode {
     type_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     *(int *)out = sizeof(void *);  // templates always have a pointer size
   }
 
@@ -182,7 +186,8 @@ class ASTLambda : public ASTNode {
     type_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     *(const ASTLambda **)out = this;
   }
 
@@ -195,7 +200,8 @@ class ASTLambda : public ASTNode {
 
 class ASTNativeFunction : public ASTNode {
  public:
-  ASTNativeFunction(void (*function)(Runner *, RunnerStackFrame *)) : function_(function) {}
+  ASTNativeFunction(void (*function)(Runner *, RunnerStackFrame *))
+      : function_(function) {}
 
   virtual ~ASTNativeFunction() {}
 
@@ -203,7 +209,10 @@ class ASTNativeFunction : public ASTNode {
     out << this->indent(level) << "native @ " << function_;
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const { function_(runner, stackFrame); }
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    function_(runner, stackFrame);
+  }
 
  private:
   void (*function_)(Runner *, RunnerStackFrame *);
@@ -216,7 +225,8 @@ void Runner::run(void *out) { ast_->run(this, this->stackFrame_, out); }
 void *Runner::alloc(int size) { return malloc(size); }
 
 void Runner::generateFunction(std::string name, ASTNodeList *args,
-                              void (*body)(Runner *, RunnerStackFrame *), ASTNode *ret) {
+                              void (*body)(Runner *, RunnerStackFrame *),
+                              ASTNode *ret) {
   ASTLambda *newLambda =
       new ASTLambda(args, new ASTNodeList({new ASTNativeFunction(body)}), ret);
   ASTType *newTemplate = new ASTType("fun");
@@ -234,7 +244,8 @@ class ASTPointer : public ASTNode {
     type_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     *(int *)out = sizeof(void *);
   }
 
@@ -251,7 +262,8 @@ class ASTArray : public ASTNode {
     size_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     int sizeOutput, typeOutput;
     size_->run(runner, stackFrame, &sizeOutput);
     type_->run(runner, stackFrame, &typeOutput);
@@ -272,7 +284,8 @@ class ASTFunctionArg : public ASTNode {
     type_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     void *ptr = stackFrame->allocVariable(name_, type_, runner);
     *(void **)out = ptr;
   }
@@ -290,7 +303,10 @@ class ASTNumber : public ASTNode {
     out << this->indent(level) << "Number: " << value_ << std::endl;
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const { *(int *)out = value_; }
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    *(int *)out = value_;
+  }
 
  private:
   int value_;
@@ -303,7 +319,8 @@ class ASTString : public ASTNode {
     out << this->indent(level) << "String: \"" << value_ << "\"" << std::endl;
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     *(const char **)out = value_.c_str();
   }
 
@@ -327,7 +344,8 @@ class ASTBinaryOp : public ASTNode {
     right_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     int leftOutput, rightOutput;
     left_->run(runner, stackFrame, &leftOutput);
     right_->run(runner, stackFrame, &rightOutput);
@@ -394,7 +412,8 @@ class ASTVariableDecl : public ASTNode {
     value_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     void *ptr = stackFrame->allocVariable(name_, type_, runner);
     value_->run(runner, stackFrame, ptr);
   }
@@ -412,7 +431,8 @@ class ASTVariable : public ASTNode {
     out << this->indent(level) << "Variable: " << name_ << std::endl;
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     auto it = stackFrame->getVariable(name_);
 
     if (out != nullptr) {
@@ -435,7 +455,8 @@ class ASTVariableAssign : public ASTNode {
     value_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     auto it = stackFrame->getVariable(name_);
     value_->run(runner, stackFrame, it);
   }
@@ -446,21 +467,23 @@ class ASTVariableAssign : public ASTNode {
 };
 class ASTFunctionCall : public ASTNode {
  public:
-  ASTFunctionCall(const std::string &name, ASTNodeList *args)
-      : name_(name), args_(args) {}
+  ASTFunctionCall(ASTNode *pointer, ASTNodeList *args)
+      : pointer_(pointer), args_(args) {}
 
   virtual ~ASTFunctionCall() { delete args_; }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "FunctionCall: " << name_ << std::endl;
+    out << this->indent(level) << "FunctionCall: " << std::endl;
+    pointer_->print(out, level + 1);
     args_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
-    void *lambdaAddress = stackFrame->getVariable(name_);
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    void *lambdaAddress;
+    pointer_->run(runner, stackFrame, &lambdaAddress);
 
-    ASTLambda *lambda = *(ASTLambda **)lambdaAddress;
-
+    ASTLambda *lambda = (ASTLambda *)lambdaAddress;
 
     RunnerStackFrame newStackFrame(stackFrame);
     int i = 0;
@@ -487,7 +510,7 @@ class ASTFunctionCall : public ASTNode {
   }
 
  private:
-  std::string name_;
+  ASTNode *pointer_;
   ASTNodeList *args_;
 };
 class ASTIf : public ASTNode {
@@ -510,7 +533,8 @@ class ASTIf : public ASTNode {
     }
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     int conditionOutput;
     condition_->run(runner, stackFrame, &conditionOutput);
     if (conditionOutput) {
@@ -541,7 +565,8 @@ class ASTWhile : public ASTNode {
     body_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     int conditionOutput;
     condition_->run(runner, stackFrame, &conditionOutput);
     while (conditionOutput) {
@@ -565,7 +590,8 @@ class ASTReturn : public ASTNode {
     value_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
     value_->run(runner, stackFrame, out);
     runner->_return = true;
   }
@@ -585,7 +611,7 @@ class Parser {
     }
     if (standalone) {
       result->add(
-          new ASTReturn(new ASTFunctionCall("main", new ASTNodeList())));
+          new ASTReturn(new ASTFunctionCall(new ASTVariable("main"), new ASTNodeList())));
     }
     return result;
   }
@@ -913,28 +939,45 @@ class Parser {
         ASTNode *value = parseExpression();
         result = new ASTReturn(value);
       } else {
-        if (in_.peek() == '(') {
-          in_.get();
-          ASTNodeList *args = new ASTNodeList();
-          while (in_.peek() != ')') {
-            skipWhitespace();
-            args->add(parseExpression());
-            skipWhitespace();
-            if (in_.peek() == ',') {
-              in_.get();
-            } else {
-            }
-          }
-          in_.get();
+        // if (in_.peek() == '(') {
+        //   in_.get();
+        //   ASTNodeList *args = new ASTNodeList();
+        //   while (in_.peek() != ')') {
+        //     skipWhitespace();
+        //     args->add(parseExpression());
+        //     skipWhitespace();
+        //     if (in_.peek() == ',') {
+        //       in_.get();
+        //     } else {
+        //     }
+        //   }
+        //   in_.get();
 
-          result = new ASTFunctionCall(name, args);
-        } else {
-          result = new ASTVariable(name);
-        }
+        //   result = new ASTFunctionCall(name, args);
+        // } else {
+        result = new ASTVariable(name);
+        // }
         skipWhitespace();
       }
     } else {
       result = parseTerm();
+    }
+    skipWhitespace();
+    if(in_.peek() == '(') {
+      in_.get();
+      ASTNodeList *args = new ASTNodeList();
+      while (in_.peek() != ')') {
+        skipWhitespace();
+        args->add(parseExpression());
+        skipWhitespace();
+        if (in_.peek() == ',') {
+          in_.get();
+        } else {
+        }
+      }
+      in_.get();
+
+      result = new ASTFunctionCall(result, args);
     }
     skipWhitespace();
     while (isValidOperatorChar(in_.peek())) {
