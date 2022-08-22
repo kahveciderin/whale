@@ -9,6 +9,7 @@
 
 class ASTNodeList;
 class Runner;
+class RunnerStackFrame;
 
 class ASTNode {
  public:
@@ -21,7 +22,7 @@ class ASTNode {
     }
     return s;
   }
-  virtual void run(Runner *runner, void *out = nullptr) const = 0;
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out = nullptr) const = 0;
 };
 
 class ASTType : public ASTNode {
@@ -32,7 +33,7 @@ class ASTType : public ASTNode {
     out << this->indent(level) << "Type " << name_ << std::endl;
   }
 
-  virtual void run(Runner *runner, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
     if (name_ == "i32") {
       *(int *)out = sizeof(int);
     } else if (name_ == "i64") {
@@ -58,20 +59,8 @@ class ASTType : public ASTNode {
   std::string name_;
 };
 
-class RunnerStackFrame {
- public:
-  RunnerStackFrame(RunnerStackFrame *parent = nullptr) : parent_(parent) {}
-  ~RunnerStackFrame() {
-    // TODO: gc
-  }
-
-  RunnerStackFrame *parent_;
-  std::map<std::string, void *> variables_;  // name -> value
-};
-
 class Runner {
  public:
-  RunnerStackFrame *current_frame_ = new RunnerStackFrame();
   bool _return = false;
   Runner(ASTNode *ast);
 
@@ -79,13 +68,9 @@ class Runner {
   void *alloc(int size);
 
   void generateFunction(std::string name, ASTNodeList *args,
-                        void (*body)(Runner *),
+                        void (*body)(Runner *, RunnerStackFrame *),
                         ASTNode *ret = new ASTType("void"));
 
-  void *getVariable(const std::string &name);
-  template <typename T>
-  T getVariable(const std::string &name);
-  void *allocVariable(const std::string &name, ASTNode *type);
   void gc();
 
   void enterFrame();
@@ -93,6 +78,37 @@ class Runner {
 
  private:
   ASTNode *ast_;
+  RunnerStackFrame *stackFrame_;
+};
+
+class RunnerStackFrame {
+ public:
+  RunnerStackFrame(RunnerStackFrame *parent = nullptr) : parent_(parent) {}
+  ~RunnerStackFrame() {
+    for (auto &kv : variables_) {
+      free(kv.second);
+    }
+  }
+
+  void *getVariable(const std::string &name) {
+    if (this->variables_[name] != nullptr) return this->variables_[name];
+    if (this->parent_ != nullptr) return this->parent_->getVariable(name);
+    return nullptr;
+  };
+  template <typename T>
+  T getVariable(const std::string &name) {
+    return *(T *)this->getVariable(name);
+  };
+  void *allocVariable(const std::string &name, ASTNode *type, Runner *runner) {
+    int size;
+    type->run(runner, this, &size);
+    void *value = runner->alloc(size);
+    this->variables_[name] = value;
+    return value;
+  };
+
+  RunnerStackFrame *parent_;
+  std::map<std::string, void *> variables_;  // name -> value
 };
 
 class ASTNodeList : public ASTNode {
@@ -115,17 +131,17 @@ class ASTNodeList : public ASTNode {
     }
   }
 
-  virtual void run(Runner *runner, void *out) const {
-    runner->enterFrame();
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+    RunnerStackFrame newStackFrame(stackFrame);
+
     unsigned long trash_ = 0;
     for (auto node : nodes_) {
-      node->run(runner, &trash_);
+      node->run(runner, &newStackFrame, &trash_);
       if (runner->_return) {
         *(unsigned long *)out = trash_;
         break;
       }
     }
-    runner->exitFrame();
     runner->gc();
   }
 
@@ -144,7 +160,7 @@ class ASTTemplate : public ASTNode {
     type_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
     *(int *)out = sizeof(void *);  // templates always have a pointer size
   }
 
@@ -166,7 +182,7 @@ class ASTLambda : public ASTNode {
     type_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
     *(const ASTLambda **)out = this;
   }
 
@@ -179,7 +195,7 @@ class ASTLambda : public ASTNode {
 
 class ASTNativeFunction : public ASTNode {
  public:
-  ASTNativeFunction(void (*function)(Runner *)) : function_(function) {}
+  ASTNativeFunction(void (*function)(Runner *, RunnerStackFrame *)) : function_(function) {}
 
   virtual ~ASTNativeFunction() {}
 
@@ -187,55 +203,27 @@ class ASTNativeFunction : public ASTNode {
     out << this->indent(level) << "native @ " << function_;
   }
 
-  virtual void run(Runner *runner, void *out) const { function_(runner); }
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const { function_(runner, stackFrame); }
 
  private:
-  void (*function_)(Runner *);
+  void (*function_)(Runner *, RunnerStackFrame *);
 };
 
-Runner::Runner(ASTNode *ast) : ast_(ast) {}
-void Runner::run(void *out) { ast_->run(this, out); }
+Runner::Runner(ASTNode *ast) : ast_(ast) {
+  this->stackFrame_ = new RunnerStackFrame();
+}
+void Runner::run(void *out) { ast_->run(this, this->stackFrame_, out); }
 void *Runner::alloc(int size) { return malloc(size); }
-void *Runner::getVariable(const std::string &name) {
-  RunnerStackFrame *frame = current_frame_;
-  while (frame != nullptr) {
-    if (frame->variables_[name]) {
-      return frame->variables_[name];
-    }
-    frame = frame->parent_;
-  }
-  throw std::runtime_error("Variable not found: " + name);
-}
-void *Runner::allocVariable(const std::string &name, ASTNode *type) {
-  int size;
-  type->run(this, &size);
-  void *value = this->alloc(size);
-  current_frame_->variables_[name] = value;
-  return value;
-}
-template <typename T>
-  T Runner::getVariable(const std::string &name){
-    return *(T *)this->getVariable(name);
-  }
+
 void Runner::generateFunction(std::string name, ASTNodeList *args,
-                              void (*body)(Runner *), ASTNode *ret) {
+                              void (*body)(Runner *, RunnerStackFrame *), ASTNode *ret) {
   ASTLambda *newLambda =
       new ASTLambda(args, new ASTNodeList({new ASTNativeFunction(body)}), ret);
   ASTType *newTemplate = new ASTType("fun");
-  void *ptr = allocVariable(name, newTemplate);
-  newLambda->run(this, ptr);
+  void *ptr = this->stackFrame_->allocVariable(name, newTemplate, this);
+  newLambda->run(this, stackFrame_, ptr);
 }
-void Runner::gc() {
-}
-void Runner::enterFrame() {
-  current_frame_ = new RunnerStackFrame(current_frame_);
-}
-void Runner::exitFrame() {
-  RunnerStackFrame *old = current_frame_;
-  current_frame_ = current_frame_->parent_;
-  delete old;
-}
-
+void Runner::gc() {}
 
 class ASTPointer : public ASTNode {
  public:
@@ -246,7 +234,7 @@ class ASTPointer : public ASTNode {
     type_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
     *(int *)out = sizeof(void *);
   }
 
@@ -263,10 +251,10 @@ class ASTArray : public ASTNode {
     size_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
     int sizeOutput, typeOutput;
-    size_->run(runner, &sizeOutput);
-    type_->run(runner, &typeOutput);
+    size_->run(runner, stackFrame, &sizeOutput);
+    type_->run(runner, stackFrame, &typeOutput);
     *(int *)out = sizeOutput * typeOutput;
   }
 
@@ -284,8 +272,8 @@ class ASTFunctionArg : public ASTNode {
     type_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
-    void *ptr = runner->allocVariable(name_, type_);
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+    void *ptr = stackFrame->allocVariable(name_, type_, runner);
     *(void **)out = ptr;
   }
 
@@ -302,7 +290,7 @@ class ASTNumber : public ASTNode {
     out << this->indent(level) << "Number: " << value_ << std::endl;
   }
 
-  virtual void run(Runner *runner, void *out) const { *(int *)out = value_; }
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const { *(int *)out = value_; }
 
  private:
   int value_;
@@ -315,7 +303,7 @@ class ASTString : public ASTNode {
     out << this->indent(level) << "String: \"" << value_ << "\"" << std::endl;
   }
 
-  virtual void run(Runner *runner, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
     *(const char **)out = value_.c_str();
   }
 
@@ -339,10 +327,10 @@ class ASTBinaryOp : public ASTNode {
     right_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
     int leftOutput, rightOutput;
-    left_->run(runner, &leftOutput);
-    right_->run(runner, &rightOutput);
+    left_->run(runner, stackFrame, &leftOutput);
+    right_->run(runner, stackFrame, &rightOutput);
     if (op_ == "+") {
       *(int *)out = leftOutput + rightOutput;
     } else if (op_ == "-") {
@@ -406,9 +394,9 @@ class ASTVariableDecl : public ASTNode {
     value_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
-    void *ptr = runner->allocVariable(name_, type_);
-    value_->run(runner, ptr);
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+    void *ptr = stackFrame->allocVariable(name_, type_, runner);
+    value_->run(runner, stackFrame, ptr);
   }
 
  private:
@@ -424,8 +412,8 @@ class ASTVariable : public ASTNode {
     out << this->indent(level) << "Variable: " << name_ << std::endl;
   }
 
-  virtual void run(Runner *runner, void *out) const {
-    auto it = runner->getVariable(name_);
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+    auto it = stackFrame->getVariable(name_);
 
     if (out != nullptr) {
       *(unsigned long *)out = (unsigned long)*(unsigned long int **)it;
@@ -447,9 +435,9 @@ class ASTVariableAssign : public ASTNode {
     value_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
-    auto it = runner->getVariable(name_);
-    value_->run(runner, it);
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+    auto it = stackFrame->getVariable(name_);
+    value_->run(runner, stackFrame, it);
   }
 
  private:
@@ -468,24 +456,26 @@ class ASTFunctionCall : public ASTNode {
     args_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
-    void *lambdaAddress = runner->getVariable(name_);
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+    void *lambdaAddress = stackFrame->getVariable(name_);
 
     ASTLambda *lambda = *(ASTLambda **)lambdaAddress;
 
+
+    RunnerStackFrame newStackFrame(stackFrame);
     int i = 0;
     for (auto arg : lambda->args_->nodes_) {
       void *variableAddress;
-      arg->run(runner, &variableAddress);
-      this->args_->nodes_[i]->run(runner, variableAddress);
+      arg->run(runner, &newStackFrame, &variableAddress);
+      this->args_->nodes_[i]->run(runner, stackFrame, variableAddress);
       i++;
     }
 
     int bytes;
-    lambda->type_->run(runner, &bytes);
+    lambda->type_->run(runner, &newStackFrame, &bytes);
     void *returnAddress = runner->alloc(bytes);
 
-    lambda->body_->run(runner, returnAddress);
+    lambda->body_->run(runner, &newStackFrame, returnAddress);
 
     if (out != nullptr) {
       *(unsigned long *)out = *(unsigned long *)returnAddress;
@@ -520,13 +510,13 @@ class ASTIf : public ASTNode {
     }
   }
 
-  virtual void run(Runner *runner, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
     int conditionOutput;
-    condition_->run(runner, &conditionOutput);
+    condition_->run(runner, stackFrame, &conditionOutput);
     if (conditionOutput) {
-      body_->run(runner, out);
+      body_->run(runner, stackFrame, out);
     } else if (elseBody_ != nullptr) {
-      elseBody_->run(runner, out);
+      elseBody_->run(runner, stackFrame, out);
     }
   }
 
@@ -551,12 +541,12 @@ class ASTWhile : public ASTNode {
     body_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
     int conditionOutput;
-    condition_->run(runner, &conditionOutput);
+    condition_->run(runner, stackFrame, &conditionOutput);
     while (conditionOutput) {
-      body_->run(runner, out);
-      condition_->run(runner, &conditionOutput);
+      body_->run(runner, stackFrame, out);
+      condition_->run(runner, stackFrame, &conditionOutput);
     }
   }
 
@@ -575,8 +565,8 @@ class ASTReturn : public ASTNode {
     value_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, void *out) const {
-    value_->run(runner, out);
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+    value_->run(runner, stackFrame, out);
     runner->_return = true;
   }
 
@@ -1010,38 +1000,33 @@ int main() {
 
   Runner runner(ast);
 
-  runner.generateFunction(
-      "print",
-      new ASTNodeList(
-          {new ASTFunctionArg(new ASTPointer(new ASTType("char")), "str")}),
-      [](Runner *runner) {
-        char *str = runner->getVariable<char*>("str");
+  runner.generateFunction("print",
+                          new ASTNodeList({new ASTFunctionArg(
+                              new ASTPointer(new ASTType("char")), "str")}),
+                          [](Runner *runner, RunnerStackFrame *stackFrame) {
+                            char *str = stackFrame->getVariable<char *>("str");
 
-        std::cout << str << std::endl;
-      });
+                            std::cout << str << std::endl;
+                          });
   runner.generateFunction(
       "printintl",
       new ASTNodeList(
           {new ASTFunctionArg(new ASTPointer(new ASTType("char")), "str"),
            new ASTFunctionArg(new ASTPointer(new ASTType("i32")), "number")}),
-      [](Runner *runner) {
-        char *str = runner->getVariable<char*>("str");
-        int number = runner->getVariable<int>("number");
+      [](Runner *runner, RunnerStackFrame *stackFrame) {
+        char *str = stackFrame->getVariable<char *>("str");
+        int number = stackFrame->getVariable<int>("number");
 
         std::cout << str << number << std::endl;
       });
-  runner.generateFunction(
-      "printint",
-      new ASTNodeList(
-          {new ASTFunctionArg(new ASTPointer(new ASTType("i32")), "number")}),
-      [](Runner *runner) {
-        int number = runner->getVariable<int>("number");
+  runner.generateFunction("printint",
+                          new ASTNodeList({new ASTFunctionArg(
+                              new ASTPointer(new ASTType("i32")), "number")}),
+                          [](Runner *runner, RunnerStackFrame *stackFrame) {
+                            int number = stackFrame->getVariable<int>("number");
 
-        std::cout << number << std::endl;
-      });
-  runner.generateFunction("vardump", new ASTNodeList(), [](Runner *runner) {
-
-  });
+                            std::cout << number << std::endl;
+                          });
 
   runner.run(&exitCode);
 
