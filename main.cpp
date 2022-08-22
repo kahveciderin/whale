@@ -58,21 +58,21 @@ class ASTType : public ASTNode {
   std::string name_;
 };
 
-class RunnerVariable {
+class RunnerStackFrame {
  public:
-  RunnerVariable(const std::string &name, void *value, int depth = 0)
-      : name_(name), value_(value), depth_(depth) {}
+  RunnerStackFrame(RunnerStackFrame *parent = nullptr) : parent_(parent) {}
+  ~RunnerStackFrame() {
+    // TODO: gc
+  }
 
-  std::string name_;
-  void *value_;
-  int depth_;
+  RunnerStackFrame *parent_;
+  std::map<std::string, void *> variables_;  // name -> value
 };
 
 class Runner {
  public:
-  std::vector<RunnerVariable *> variables;
+  RunnerStackFrame *current_frame_ = new RunnerStackFrame();
   bool _return = false;
-  int _depth = 0;
   Runner(ASTNode *ast);
 
   void run(void *out);
@@ -82,10 +82,14 @@ class Runner {
                         void (*body)(Runner *),
                         ASTNode *ret = new ASTType("void"));
 
-  RunnerVariable *getVariable(const std::string &name);
-  void *allocVariable(const std::string &name, ASTNode *type, int depth = -1);
-  void setVariable(const std::string &name, void *value);
+  void *getVariable(const std::string &name);
+  template <typename T>
+  T getVariable(const std::string &name);
+  void *allocVariable(const std::string &name, ASTNode *type);
   void gc();
+
+  void enterFrame();
+  void exitFrame();
 
  private:
   ASTNode *ast_;
@@ -112,7 +116,7 @@ class ASTNodeList : public ASTNode {
   }
 
   virtual void run(Runner *runner, void *out) const {
-    runner->_depth++;
+    runner->enterFrame();
     unsigned long trash_ = 0;
     for (auto node : nodes_) {
       node->run(runner, &trash_);
@@ -121,7 +125,7 @@ class ASTNodeList : public ASTNode {
         break;
       }
     }
-    runner->_depth--;
+    runner->exitFrame();
     runner->gc();
   }
 
@@ -192,40 +196,27 @@ class ASTNativeFunction : public ASTNode {
 Runner::Runner(ASTNode *ast) : ast_(ast) {}
 void Runner::run(void *out) { ast_->run(this, out); }
 void *Runner::alloc(int size) { return malloc(size); }
-RunnerVariable *Runner::getVariable(const std::string &name) {
-  std::vector<RunnerVariable *> vars;
-  for (int i = variables.size() - 1; i >= 0; i--) {
-    if (variables[i]->name_ == name) {
-      if (variables[i]->depth_ <= this->_depth) {
-        vars.push_back(variables[i]);
-      }
+void *Runner::getVariable(const std::string &name) {
+  RunnerStackFrame *frame = current_frame_;
+  while (frame != nullptr) {
+    if (frame->variables_[name]) {
+      return frame->variables_[name];
     }
+    frame = frame->parent_;
   }
-  if (vars.size() == 0) {
-    throw std::runtime_error("Variable not found: " + name);
-  }
-  // order vars by depth
-  std::sort(vars.begin(), vars.end(), [](RunnerVariable *a, RunnerVariable *b) {
-    return a->depth_ > b->depth_;
-  });
-
-  return vars[0];
+  throw std::runtime_error("Variable not found: " + name);
 }
-void *Runner::allocVariable(const std::string &name, ASTNode *type, int depth) {
-  if (depth < 0) {
-    depth = this->_depth;
-  }
-
-  int size = 0;
+void *Runner::allocVariable(const std::string &name, ASTNode *type) {
+  int size;
   type->run(this, &size);
   void *value = this->alloc(size);
-  variables.push_back(new RunnerVariable(name, value, this->_depth));
+  current_frame_->variables_[name] = value;
   return value;
 }
-void Runner::setVariable(const std::string &name, void *value) {
-  RunnerVariable *var = getVariable(name);
-  var->value_ = value;
-}
+template <typename T>
+  T Runner::getVariable(const std::string &name){
+    return *(T *)this->getVariable(name);
+  }
 void Runner::generateFunction(std::string name, ASTNodeList *args,
                               void (*body)(Runner *), ASTNode *ret) {
   ASTLambda *newLambda =
@@ -235,18 +226,16 @@ void Runner::generateFunction(std::string name, ASTNodeList *args,
   newLambda->run(this, ptr);
 }
 void Runner::gc() {
-  std::vector<RunnerVariable *> newVars;
-  for (auto var : variables) {
-    if (var->depth_ <= this->_depth) {
-      newVars.push_back(var);
-    } else {
-      // std::cout << "GC'd " << var->name_ << std::endl;
-      // free(var->value_);
-      delete var;
-    }
-  }
-  variables = newVars;
 }
+void Runner::enterFrame() {
+  current_frame_ = new RunnerStackFrame(current_frame_);
+}
+void Runner::exitFrame() {
+  RunnerStackFrame *old = current_frame_;
+  current_frame_ = current_frame_->parent_;
+  delete old;
+}
+
 
 class ASTPointer : public ASTNode {
  public:
@@ -436,7 +425,7 @@ class ASTVariable : public ASTNode {
   }
 
   virtual void run(Runner *runner, void *out) const {
-    auto it = runner->getVariable(name_)->value_;
+    auto it = runner->getVariable(name_);
 
     if (out != nullptr) {
       *(unsigned long *)out = (unsigned long)*(unsigned long int **)it;
@@ -459,8 +448,7 @@ class ASTVariableAssign : public ASTNode {
   }
 
   virtual void run(Runner *runner, void *out) const {
-    auto it = runner->getVariable(name_)->value_;
-
+    auto it = runner->getVariable(name_);
     value_->run(runner, it);
   }
 
@@ -481,13 +469,10 @@ class ASTFunctionCall : public ASTNode {
   }
 
   virtual void run(Runner *runner, void *out) const {
-    void *lambdaAddress = runner->getVariable(name_)->value_;
+    void *lambdaAddress = runner->getVariable(name_);
 
     ASTLambda *lambda = *(ASTLambda **)lambdaAddress;
 
-    // std::cout << "Calling " << name_ << " @ " << lambda << std::endl;
-
-    runner->_depth++;
     int i = 0;
     for (auto arg : lambda->args_->nodes_) {
       void *variableAddress;
@@ -495,7 +480,6 @@ class ASTFunctionCall : public ASTNode {
       this->args_->nodes_[i]->run(runner, variableAddress);
       i++;
     }
-    runner->_depth--;
 
     int bytes;
     lambda->type_->run(runner, &bytes);
@@ -531,7 +515,7 @@ class ASTIf : public ASTNode {
     out << this->indent(level) << "If: " << std::endl;
     condition_->print(out, level + 1);
     body_->print(out, level + 1);
-    if(elseBody_ != nullptr) {
+    if (elseBody_ != nullptr) {
       elseBody_->print(out, level + 1);
     }
   }
@@ -617,9 +601,17 @@ class Parser {
   }
 
  private:
-  void skipWhitespace() {
-    while (isspace(in_.peek())) {
+  void skipComment() {
+    while (in_.peek() != '\n' && in_.peek() != EOF) {
       in_.get();
+    }
+  }
+  void skipWhitespace() {
+    while (isspace(in_.peek()) || in_.peek() == '#') {
+      char c_ = in_.get();
+      if (c_ == '#') {
+        skipComment();
+      }
     }
   }
   bool isValidIdentifierChar(char i, int pos = 0) {
@@ -1023,7 +1015,7 @@ int main() {
       new ASTNodeList(
           {new ASTFunctionArg(new ASTPointer(new ASTType("char")), "str")}),
       [](Runner *runner) {
-        char *str = *(char **)runner->getVariable("str")->value_;
+        char *str = runner->getVariable<char*>("str");
 
         std::cout << str << std::endl;
       });
@@ -1033,8 +1025,8 @@ int main() {
           {new ASTFunctionArg(new ASTPointer(new ASTType("char")), "str"),
            new ASTFunctionArg(new ASTPointer(new ASTType("i32")), "number")}),
       [](Runner *runner) {
-        char *str = *(char **)runner->getVariable("str")->value_;
-        int number = *(int *)runner->getVariable("number")->value_;
+        char *str = runner->getVariable<char*>("str");
+        int number = runner->getVariable<int>("number");
 
         std::cout << str << number << std::endl;
       });
@@ -1043,30 +1035,12 @@ int main() {
       new ASTNodeList(
           {new ASTFunctionArg(new ASTPointer(new ASTType("i32")), "number")}),
       [](Runner *runner) {
-        int number = *(int *)runner->getVariable("number")->value_;
+        int number = runner->getVariable<int>("number");
 
         std::cout << number << std::endl;
       });
   runner.generateFunction("vardump", new ASTNodeList(), [](Runner *runner) {
-    std::cout << "Runner depth: " << runner->_depth << std::endl;
 
-    std::vector<RunnerVariable *> vars;
-    for (int i = runner->variables.size() - 1; i >= 0; i--) {
-      if (runner->variables[i]->depth_ <= runner->_depth) {
-        vars.push_back(runner->variables[i]);
-      }
-    }
-
-    // order vars by depth
-    std::sort(vars.begin(), vars.end(),
-              [](RunnerVariable *a, RunnerVariable *b) {
-                return a->depth_ > b->depth_;
-              });
-
-    for (auto &var : vars) {
-      std::cout << var->name_ << " @ " << var->depth_ << " (" << var->value_
-                << ") = " << *(int *)var->value_ << std::endl;
-    }
   });
 
   runner.run(&exitCode);
