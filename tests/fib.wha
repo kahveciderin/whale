@@ -1,13 +1,15 @@
-fun<void> main = %{
+fun main = %{
 
-    fun<i32> fib = %n:i32{
-        if n == 1 || n == 2 {
+    fun fib = %n:i32{
+        if (n == 1) || (n == 2) {
             return 1;
         };
         return fib(n-1) + fib(n-2);
-    };
+    } -> i32;
 
-    for i in 1..10 {
+    i32 i = 1;
+    while i <= 10 {
         print(fib(i));
+        i = i + 1;
     };
 };

@@ -4,7 +4,7 @@
 CC = g++
 
 # define any compile-time flags
-CFLAGS = -Wall
+CFLAGS = -Wall -g
 
 # get all the cpp files in the current directory
 SRCS = $(wildcard *.cpp)
