@@ -54,7 +54,7 @@ class RunnerStackFrame;
 
 class ASTNode {
  public:
-  unsigned long pos_ = 0;
+  ASTNode(unsigned long pos) : pos_(pos) {}
   virtual ~ASTNode() {}
   virtual void print(std::ostream &out, int level = 0) const = 0;
   std::string indent(int level) const {
@@ -69,15 +69,17 @@ class ASTNode {
 
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const = 0;
+  unsigned long pos_ = 0;
 };
 class ASTType : public ASTNode {
  public:
-  ASTType() {}
+  ASTType(unsigned long pos) : ASTNode(pos) {}
 };
 
 class ASTBaseType : public ASTType {
  public:
-  ASTBaseType(const std::string &name) : name_(name) {}
+  ASTBaseType(const std::string &name, unsigned long pos = 0)
+      : ASTType(pos), name_(name) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Type: " << name_ << std::endl;
@@ -131,7 +133,8 @@ class ASTBaseType : public ASTType {
 class Runner {
  public:
   bool _return = false;
-  Runner(ASTNode *ast);
+  ASTNode *error = nullptr;
+  Runner(ASTNode *ast, std::istream &code);
 
   void run(void *out);
   void *alloc(int size);
@@ -145,9 +148,12 @@ class Runner {
   void enterFrame();
   void exitFrame();
 
+  void errorAt(const ASTNode *node, std::string msg);
+
  private:
   ASTNode *ast_;
   RunnerStackFrame *stackFrame_;
+  std::istream &code_;
 };
 
 class RunnerStackFrame {
@@ -189,8 +195,9 @@ class RunnerStackFrame {
 
 class ASTNodeList : public ASTNode {
  public:
-  ASTNodeList(const std::vector<ASTNode *> &nodes) : nodes_(nodes) {}
-  ASTNodeList() {}
+  ASTNodeList(const std::vector<ASTNode *> &nodes, unsigned long pos = 0)
+      : ASTNode(pos), nodes_(nodes) {}
+  ASTNodeList(unsigned long pos = 0) : ASTNode(pos) {}
 
   virtual ~ASTNodeList() {
     for (auto node : nodes_) {
@@ -234,8 +241,8 @@ class ASTNodeList : public ASTNode {
 
 class ASTTemplate : public ASTType {
  public:
-  ASTTemplate(ASTType *type, const std::string &name)
-      : type_(type), name_(name) {}
+  ASTTemplate(ASTType *type, const std::string &name, unsigned long pos = 0)
+      : ASTType(pos), type_(type), name_(name) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Template: " << name_ << std::endl;
@@ -258,8 +265,9 @@ class ASTTemplate : public ASTType {
 };
 class ASTLambda : public ASTNode {
  public:
-  ASTLambda(ASTNodeList *args, ASTNode *body, ASTType *type)
-      : args_(args), body_(body), type_(type) {}
+  ASTLambda(ASTNodeList *args, ASTNode *body, ASTType *type,
+            unsigned long pos = 0)
+      : ASTNode(pos), args_(args), body_(body), type_(type) {}
 
   virtual ~ASTLambda() { delete body_; }
 
@@ -289,8 +297,9 @@ class ASTLambda : public ASTNode {
 
 class ASTNativeFunction : public ASTNode {
  public:
-  ASTNativeFunction(void (*function)(Runner *, RunnerStackFrame *))
-      : function_(function) {}
+  ASTNativeFunction(void (*function)(Runner *, RunnerStackFrame *),
+                    unsigned long pos = 0)
+      : ASTNode(pos), function_(function) {}
 
   virtual ~ASTNativeFunction() {}
 
@@ -312,7 +321,47 @@ class ASTNativeFunction : public ASTNode {
   void (*function_)(Runner *, RunnerStackFrame *);
 };
 
-Runner::Runner(ASTNode *ast) : ast_(ast) {
+void errorWithMessage(const std::string &msg, std::istream &code_,
+                      unsigned long pos) {
+  int line = 1;
+  int column = 0;
+  std::string lineString;
+  code_.clear();
+  code_.seekg(0);
+  for (unsigned long i = 0; i < pos; i++) {
+    if (code_.peek() == EOF) {
+      throw std::runtime_error("Error at end of file: " + msg);
+    }
+    if (code_.peek() == '\n') {
+      line++;
+      column = 0;
+    } else {
+      column++;
+    }
+    code_.get();
+  }
+  code_.clear();
+  code_.seekg(0);
+  for (int i = 0; i < line; i++) {
+    std::getline(code_, lineString);
+  }
+
+  std::string lineNoString = std::to_string(line);
+
+  std::cerr << "Error at " << line << ":" << column << "\t" << msg << "\n\n"
+            << std::endl;
+  std::cerr << std::string(5 - std::min<int>(5, lineNoString.length()), ' ') +
+                   lineNoString
+            << " | " << lineString << std::endl;
+  std::cerr << "      | " << std::string(std::max(column - 1, 0), '~') << "^"
+            << "\n\n"
+            << std::endl;
+  exit(1);
+}
+
+Runner::Runner(ASTNode *ast, std::istream &code) : ast_(ast), code_(code) {
+  code_.clear();
+  code_.seekg(0);
   this->stackFrame_ = new RunnerStackFrame();
 }
 void Runner::run(void *out) { ast_->run(this, this->stackFrame_, out); }
@@ -328,10 +377,14 @@ void Runner::generateFunction(std::string name, ASTNodeList *args,
   newLambda->run(this, stackFrame_, ptr);
 }
 void Runner::gc() {}
+void Runner::errorAt(const ASTNode *node, std::string message) {
+  errorWithMessage(message, code_, node->pos_);
+}
 
 class ASTPointer : public ASTType {
  public:
-  ASTPointer(ASTType *type) : type_(type) {}
+  ASTPointer(ASTType *type, unsigned long pos = 0)
+      : ASTType(pos), type_(type) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Pointer: " << std::endl;
@@ -353,7 +406,8 @@ class ASTPointer : public ASTType {
 };
 class ASTArray : public ASTType {
  public:
-  ASTArray(ASTType *type, ASTNode *size) : type_(type), size_(size) {}
+  ASTArray(ASTType *type, ASTNode *size, unsigned long pos = 0)
+      : ASTType(pos), type_(type), size_(size) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Array: " << std::endl;
@@ -380,8 +434,8 @@ class ASTArray : public ASTType {
 };
 class ASTFunctionArg : public ASTNode {
  public:
-  ASTFunctionArg(ASTType *type, const std::string &name)
-      : type_(type), name_(name) {}
+  ASTFunctionArg(ASTType *type, const std::string &name, unsigned long pos = 0)
+      : ASTNode(pos), name_(name), type_(type) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Argument: " << name_ << std::endl;
@@ -398,15 +452,16 @@ class ASTFunctionArg : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return type_->returnType(runner, stack);
   }
+  std::string name_;
 
  private:
   ASTType *type_;
-  std::string name_;
 };
 
 class ASTNumber : public ASTNode {
  public:
-  ASTNumber(long int value) : value_(value) {}
+  ASTNumber(long int value, unsigned long pos = 0)
+      : ASTNode(pos), value_(value) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Number: " << value_ << std::endl;
@@ -427,7 +482,8 @@ class ASTNumber : public ASTNode {
 };
 class ASTDouble : public ASTNode {
  public:
-  ASTDouble(double value) : value_(value) {}
+  ASTDouble(double value, unsigned long pos = 0)
+      : ASTNode(pos), value_(value) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Double: " << value_ << std::endl;
@@ -448,7 +504,8 @@ class ASTDouble : public ASTNode {
 };
 class ASTString : public ASTNode {
  public:
-  ASTString(const std::string &value) : value_(value) {}
+  ASTString(const std::string &value, unsigned long pos = 0)
+      : ASTNode(pos), value_(value) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "String: \"" << value_ << "\"" << std::endl;
@@ -470,8 +527,9 @@ class ASTString : public ASTNode {
 
 class ASTBinaryOp : public ASTNode {
  public:
-  ASTBinaryOp(std::string op, ASTNode *left, ASTNode *right)
-      : op_(op), left_(left), right_(right) {}
+  ASTBinaryOp(std::string op, ASTNode *left, ASTNode *right,
+              unsigned long pos = 0)
+      : ASTNode(pos), op_(op), left_(left), right_(right) {}
 
   virtual ~ASTBinaryOp() {
     delete left_;
@@ -533,7 +591,7 @@ class ASTBinaryOp : public ASTNode {
     } else if (op_ == ">=") {
       *(int *)out = leftOutput >= rightOutput;
     } else {
-      throw std::runtime_error("Unknown operator: " + op_);
+      runner->errorAt(this, "Unknown binary operator: " + op_);
     }
   }
 
@@ -550,7 +608,8 @@ class ASTBinaryOp : public ASTNode {
 
 class ASTCast : public ASTNode {
  public:
-  ASTCast(ASTNode *value, ASTType *type) : value_(value), type_(type) {}
+  ASTCast(ASTNode *value, ASTType *type, unsigned long pos = 0)
+      : ASTNode(pos), value_(value), type_(type) {}
 
   virtual ~ASTCast() {
     delete type_;
@@ -595,9 +654,9 @@ class ASTCast : public ASTNode {
       value_->run(runner, stackFrame, &value);
       *(void **)out = (void *)value;
     } else {
-      throw std::runtime_error(
-          "Unknown cast: " + value_->returnType(runner, stackFrame) + " to " +
-          type_->returnType(runner, stackFrame));
+      runner->errorAt(
+          this, "Unknown cast: " + value_->returnType(runner, stackFrame) +
+                    " to " + type_->returnType(runner, stackFrame));
     }
   }
 
@@ -613,8 +672,9 @@ class ASTCast : public ASTNode {
 
 class ASTVariableDecl : public ASTNode {
  public:
-  ASTVariableDecl(const std::string &name, ASTType *type, ASTNode *value)
-      : name_(name), type_(type), value_(value) {}
+  ASTVariableDecl(const std::string &name, ASTType *type, ASTNode *value,
+                  unsigned long pos = 0)
+      : ASTNode(pos), name_(name), type_(type), value_(value) {}
 
   virtual ~ASTVariableDecl() {
     delete type_;
@@ -624,7 +684,7 @@ class ASTVariableDecl : public ASTNode {
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "VariableDecl: " << name_ << std::endl;
     type_->print(out, level + 1);
-    if(value_ != nullptr) {
+    if (value_ != nullptr) {
       value_->print(out, level + 1);
     }
   }
@@ -634,9 +694,9 @@ class ASTVariableDecl : public ASTNode {
     if (value_ != nullptr) {
       if (type_->returnType(runner, stackFrame) !=
           value_->returnType(runner, stackFrame)) {
-        throw std::runtime_error(
-            "Type mismatch: " + type_->returnType(runner, stackFrame) +
-            " != " + value_->returnType(runner, stackFrame));
+        runner->errorAt(
+            this, "Type mismatch: " + type_->returnType(runner, stackFrame) +
+                      " != " + value_->returnType(runner, stackFrame));
       }
     }
 
@@ -657,7 +717,8 @@ class ASTVariableDecl : public ASTNode {
 };
 class ASTVariable : public ASTNode {
  public:
-  ASTVariable(const std::string &name) : name_(name) {}
+  ASTVariable(const std::string &name, unsigned long pos = 0)
+      : ASTNode(pos), name_(name) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Variable: " << name_ << std::endl;
@@ -681,8 +742,9 @@ class ASTVariable : public ASTNode {
 };
 class ASTVariableAssign : public ASTNode {
  public:
-  ASTVariableAssign(const std::string &name, ASTNode *value)
-      : name_(name), value_(value) {}
+  ASTVariableAssign(const std::string &name, ASTNode *value,
+                    unsigned long pos = 0)
+      : ASTNode(pos), name_(name), value_(value) {}
 
   virtual ~ASTVariableAssign() { delete value_; }
 
@@ -707,8 +769,8 @@ class ASTVariableAssign : public ASTNode {
 };
 class ASTFunctionCall : public ASTNode {
  public:
-  ASTFunctionCall(ASTNode *pointer, ASTNodeList *args)
-      : pointer_(pointer), args_(args) {}
+  ASTFunctionCall(ASTNode *pointer, ASTNodeList *args, unsigned long pos = 0)
+      : ASTNode(pos), pointer_(pointer), args_(args) {}
 
   virtual ~ASTFunctionCall() { delete args_; }
 
@@ -732,18 +794,21 @@ class ASTFunctionCall : public ASTNode {
     RunnerStackFrame newStackFrame(stackFrame);
     int i = 0;
     if (lambda->args_->nodes_.size() != args_->nodes_.size()) {
-      throw std::runtime_error("Wrong number of arguments on function call: " +
-                               std::to_string(lambda->args_->nodes_.size()) +
-                               " expected, " +
-                               std::to_string(args_->nodes_.size()) + " given");
+      runner->errorAt(this, "Wrong number of arguments on function call: " +
+                                std::to_string(lambda->args_->nodes_.size()) +
+                                " expected, " +
+                                std::to_string(args_->nodes_.size()) +
+                                " given");
     }
     for (auto arg : lambda->args_->nodes_) {
       if (arg->returnType(runner, &newStackFrame) !=
           args_->nodes_[i]->returnType(runner, &newStackFrame)) {
-        throw std::runtime_error(
-            "Type mismatch on function call: " +
-            arg->returnType(runner, &newStackFrame) + " expected, " +
-            args_->nodes_[i]->returnType(runner, &newStackFrame) + " given");
+        runner->errorAt(
+            this, "Type mismatch on function argument" +
+                      ((ASTFunctionArg *)arg)->name_ + ": " +
+                      arg->returnType(runner, &newStackFrame) + " expected, " +
+                      args_->nodes_[i]->returnType(runner, &newStackFrame) +
+                      " given");
       }
 
       void *variableAddress;
@@ -778,8 +843,9 @@ class ASTFunctionCall : public ASTNode {
 };
 class ASTIf : public ASTNode {
  public:
-  ASTIf(ASTNode *condition, ASTNode *body, ASTNode *elseBody)
-      : condition_(condition), body_(body), elseBody_(elseBody) {}
+  ASTIf(ASTNode *condition, ASTNode *body, ASTNode *elseBody,
+        unsigned long pos = 0)
+      : ASTNode(pos), condition_(condition), body_(body), elseBody_(elseBody) {}
 
   virtual ~ASTIf() {
     delete condition_;
@@ -819,8 +885,8 @@ class ASTIf : public ASTNode {
 };
 class ASTWhile : public ASTNode {
  public:
-  ASTWhile(ASTNode *condition, ASTNode *body)
-      : condition_(condition), body_(body) {}
+  ASTWhile(ASTNode *condition, ASTNode *body, unsigned long pos = 0)
+      : ASTNode(pos), condition_(condition), body_(body) {}
 
   virtual ~ASTWhile() {
     delete condition_;
@@ -854,7 +920,8 @@ class ASTWhile : public ASTNode {
 };
 class ASTReturn : public ASTNode {
  public:
-  ASTReturn(ASTNode *value) : value_(value) {}
+  ASTReturn(ASTNode *value, unsigned long pos = 0)
+      : ASTNode(pos), value_(value) {}
 
   virtual ~ASTReturn() { delete value_; }
 
@@ -878,7 +945,8 @@ class ASTReturn : public ASTNode {
 };
 class ASTRef : public ASTNode {
  public:
-  ASTRef(std::string &variable) : variable_(variable) {}
+  ASTRef(std::string &variable, unsigned long pos = 0)
+      : ASTNode(pos), variable_(variable) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Ref: " << variable_ << std::endl;
@@ -902,7 +970,8 @@ class ASTRef : public ASTNode {
 };
 class ASTDeref : public ASTNode {
  public:
-  ASTDeref(ASTNode *value) : value_(value) {}
+  ASTDeref(ASTNode *value, unsigned long pos = 0)
+      : ASTNode(pos), value_(value) {}
 
   virtual ~ASTDeref() { delete value_; }
 
@@ -914,7 +983,7 @@ class ASTDeref : public ASTNode {
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
     if (value_->returnType(runner, stackFrame).substr(0, 8) != "pointer:") {
-      throw std::runtime_error("Cannot dereference non-pointer type");
+      runner->errorAt(this, "Cannot dereference non-pointer type");
     }
 
     void *value;
@@ -928,7 +997,8 @@ class ASTDeref : public ASTNode {
     if (value_->returnType(runner, stack).substr(0, 8) == "pointer:") {
       return value_->returnType(runner, stack).substr(8);
     } else {
-      throw std::runtime_error("Cannot dereference non-pointer type");
+      runner->errorAt(this, "Cannot dereference non-pointer type");
+      return "void";
     }
   }
 
@@ -937,7 +1007,7 @@ class ASTDeref : public ASTNode {
 };
 class ASTNull : public ASTNode {
  public:
-  ASTNull() {}
+  ASTNull(unsigned long pos = 0) : ASTNode(pos) {}
 
   virtual ~ASTNull() {}
 
@@ -960,7 +1030,7 @@ class ASTNull : public ASTNode {
 };
 class ASTBool : public ASTNode {
  public:
-  ASTBool(bool value) : value_(value) {}
+  ASTBool(bool value, unsigned long pos = 0) : ASTNode(pos), value_(value) {}
 
   virtual ~ASTBool() {}
 
@@ -1071,7 +1141,7 @@ class Parser {
     } else {
       value = nullptr;
     }
-    return new ASTVariableDecl(name, type, value);
+    return new ASTVariableDecl(name, type, value, in_.tellg());
   }
 
   ASTType *parseType() {
@@ -1092,28 +1162,29 @@ class Parser {
       }
       in_.get();
       skipWhitespace();
-      return new ASTTemplate(type, name);
+      return new ASTTemplate(type, name, in_.tellg());
     }
     std::streampos newpos = in_.tellg();
     in_.seekg(oldpos);
 
     if (in_.peek() == '*') {
       in_.get();
-      return new ASTPointer(parseType());
+      return new ASTPointer(parseType(), in_.tellg());
     } else if (in_.peek() == '[') {
       in_.get();
       if (in_.peek() == ']') {
         in_.get();
-        return new ASTArray(parseType(), new ASTNumber(0));
+        return new ASTArray(parseType(), new ASTNumber(0, in_.tellg()),
+                            in_.tellg());
       }
       ASTNode *size = parseExpression();
       if (in_.get() != ']') {
         throw std::runtime_error("Expected ']'");
       }
-      return new ASTArray(parseType(), size);
+      return new ASTArray(parseType(), size, in_.tellg());
     }
     in_.seekg(newpos);
-    return new ASTBaseType(name);
+    return new ASTBaseType(name, in_.tellg());
   }
 
   ASTNodeList *parseGlobalBody() {
@@ -1122,7 +1193,7 @@ class Parser {
   }
 
   ASTNodeList *parseBody(bool errorOnEOF = true) {
-    ASTNodeList *result = new ASTNodeList();
+    ASTNodeList *result = new ASTNodeList(in_.tellg());
     skipWhitespace();
     while (in_.peek() != '}') {
       skipWhitespace();
@@ -1150,7 +1221,7 @@ class Parser {
       } expressionType = EXPRESSION;
 
       try {
-        parseType();
+        delete parseType();
         skipWhitespace();
         std::string identifier = parseIdentifier();
         skipWhitespace();
@@ -1192,7 +1263,7 @@ class Parser {
         if (in_.get() != ';') {
           throw std::runtime_error("Expected ';' after variable assignment");
         }
-        result->add(new ASTVariableAssign(name, value));
+        result->add(new ASTVariableAssign(name, value, in_.tellg()));
       } else {
         ASTNode *value = parseExpression();
         result->add(value);
@@ -1221,11 +1292,11 @@ class Parser {
     skipWhitespace();
     ASTType *type = parseType();
     skipWhitespace();
-    return new ASTFunctionArg(type, name);
+    return new ASTFunctionArg(type, name, in_.tellg());
   }
 
   ASTNodeList *parseFunctionArgs() {
-    ASTNodeList *result = new ASTNodeList();
+    ASTNodeList *result = new ASTNodeList(in_.tellg());
     while (in_.peek() != '{') {
       result->add(parseFunctionArg());
       skipWhitespace();
@@ -1258,11 +1329,12 @@ class Parser {
       if (op == "->") {
         skipWhitespace();
         ASTType *type = parseType();
-        return new ASTLambda(args, body, type);
+        return new ASTLambda(args, body, type, in_.tellg());
       }
     }
-    body->add(new ASTReturn(new ASTNumber(0)));
-    return new ASTLambda(args, body, new ASTBaseType("void"));
+    body->add(new ASTReturn(new ASTNumber(0, in_.tellg()), in_.tellg()));
+    return new ASTLambda(args, body, new ASTBaseType("void", in_.tellg()),
+                         in_.tellg());
   }
 
   ASTNode *parseExpression() {
@@ -1306,7 +1378,7 @@ class Parser {
           }
           skipWhitespace();
         }
-        result = new ASTIf(condition, ifBody, elseBody);
+        result = new ASTIf(condition, ifBody, elseBody, in_.tellg());
       } else if (name == "while") {
         ASTNode *condition = parseExpression();
         skipWhitespace();
@@ -1319,42 +1391,25 @@ class Parser {
           throw std::runtime_error("Expected '}'");
         }
         skipWhitespace();
-        result = new ASTWhile(condition, body);
+        result = new ASTWhile(condition, body, in_.tellg());
       } else if (name == "return" || name == "ret") {
         ASTNode *value = parseExpression();
-        result = new ASTReturn(value);
+        result = new ASTReturn(value, in_.tellg());
       } else if (name == "ref") {
         skipWhitespace();
         std::string value = parseIdentifier();
-        result = new ASTRef(value);
+        result = new ASTRef(value, in_.tellg());
       } else if (name == "deref") {
         ASTNode *value = parseExpression();
-        result = new ASTDeref(value);
+        result = new ASTDeref(value, in_.tellg());
       } else if (name == "null") {
-        result = new ASTNull();
+        result = new ASTNull(in_.tellg());
       } else if (name == "true") {
-        result = new ASTBool(true);
+        result = new ASTBool(true, in_.tellg());
       } else if (name == "false") {
-        result = new ASTBool(false);
+        result = new ASTBool(false, in_.tellg());
       } else {
-        // if (in_.peek() == '(') {
-        //   in_.get();
-        //   ASTNodeList *args = new ASTNodeList();
-        //   while (in_.peek() != ')') {
-        //     skipWhitespace();
-        //     args->add(parseExpression());
-        //     skipWhitespace();
-        //     if (in_.peek() == ',') {
-        //       in_.get();
-        //     } else {
-        //     }
-        //   }
-        //   in_.get();
-
-        //   result = new ASTFunctionCall(name, args);
-        // } else {
-        result = new ASTVariable(name);
-        // }
+        result = new ASTVariable(name, in_.tellg());
         skipWhitespace();
       }
     } else {
@@ -1363,7 +1418,7 @@ class Parser {
     skipWhitespace();
     if (in_.peek() == '(') {
       in_.get();
-      ASTNodeList *args = new ASTNodeList();
+      ASTNodeList *args = new ASTNodeList(in_.tellg());
       while (in_.peek() != ')') {
         skipWhitespace();
         args->add(parseExpression());
@@ -1375,7 +1430,7 @@ class Parser {
       }
       in_.get();
 
-      result = new ASTFunctionCall(result, args);
+      result = new ASTFunctionCall(result, args, in_.tellg());
     }
     skipWhitespace();
     if (in_.peek() == '-') {
@@ -1384,7 +1439,7 @@ class Parser {
       if (op == "->") {
         skipWhitespace();
         ASTType *type = parseType();
-        result = new ASTCast(result, type);
+        result = new ASTCast(result, type, in_.tellg());
       } else {
         in_.seekg(oldpos);
       }
@@ -1396,7 +1451,7 @@ class Parser {
       if (op != "=") {
         skipWhitespace();
         auto right = parseExpression();
-        result = new ASTBinaryOp(op, result, right);
+        result = new ASTBinaryOp(op, result, right, in_.tellg());
       } else {
         in_.seekg(oldpos);
         break;
@@ -1436,9 +1491,9 @@ class Parser {
         }
       }
       if (isFloat) {
-        return new ASTDouble(value);
+        return new ASTDouble(value, in_.tellg());
       } else {
-        return new ASTNumber(value);
+        return new ASTNumber(value, in_.tellg());
       }
     } else if (in_.peek() == '"') {
       in_.get();
@@ -1447,7 +1502,7 @@ class Parser {
         value += in_.get();
       }
       in_.get();
-      return new ASTString(value);
+      return new ASTString(value, in_.tellg());
     } else {
       throw std::runtime_error("Unexpected token: ");
     }
@@ -1457,19 +1512,26 @@ class Parser {
 };
 
 int main() {
+  std::cout.precision(std::numeric_limits<double>::max_digits10);
+
   std::ifstream file("tests/initial.wha");
   std::istream &code = static_cast<std::istream &>(file);
 
-  std::cout.precision(std::numeric_limits<double>::max_digits10);
-
   Parser parser(code);
-  auto ast = parser.parse();
+
+  ASTNode *ast;
+
+  try {
+    ast = parser.parse();
+  } catch (std::runtime_error &e) {
+    errorWithMessage(e.what(), code, (int)code.tellg() - 2);
+  }
 
   ast->print(std::cout);
 
   int exitCode = 0;
 
-  Runner runner(ast);
+  Runner runner(ast, code);
 
   runner.generateFunction("print",
                           new ASTNodeList({new ASTFunctionArg(
