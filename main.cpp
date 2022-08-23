@@ -249,7 +249,7 @@ class ASTTemplate : public ASTType {
 
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
-    return "template";
+    return "template-" + name_ + ":" + type_->returnType(runner, stack);
   }
 
  private:
