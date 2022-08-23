@@ -33,7 +33,8 @@ enum class ValueType {
   void_,
   fun,
   bool_,
-  pointer
+  pointer,
+  array
 };
 ValueType parseType(std::string type) {
   type = type.substr(0, type.find(':'));
@@ -55,6 +56,8 @@ ValueType parseType(std::string type) {
     return ValueType::bool_;
   } else if (type == "pointer") {
     return ValueType::pointer;
+  } else if (type == "array") {
+    return ValueType::array;
   } else {
     throw std::runtime_error("Unknown type: " + type);
   }
@@ -82,10 +85,14 @@ class ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const = 0;
 };
-
 class ASTType : public ASTNode {
+  public:
+    ASTType() {}
+};
+
+class ASTBaseType : public ASTType {
  public:
-  ASTType(const std::string &name) : name_(name) {}
+  ASTBaseType(const std::string &name) : name_(name) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Type: " << name_ << std::endl;
@@ -146,7 +153,7 @@ class Runner {
 
   void generateFunction(std::string name, ASTNodeList *args,
                         void (*body)(Runner *, RunnerStackFrame *),
-                        ASTNode *ret = new ASTType("void"));
+                        ASTType *ret = new ASTBaseType("void"));
 
   void gc();
 
@@ -240,9 +247,9 @@ class ASTNodeList : public ASTNode {
  private:
 };
 
-class ASTTemplate : public ASTNode {
+class ASTTemplate : public ASTType {
  public:
-  ASTTemplate(ASTNode *type, const std::string &name)
+  ASTTemplate(ASTType *type, const std::string &name)
       : type_(type), name_(name) {}
 
   virtual void print(std::ostream &out, int level) const {
@@ -261,12 +268,12 @@ class ASTTemplate : public ASTNode {
   }
 
  private:
-  ASTNode *type_;
+  ASTType *type_;
   std::string name_;
 };
 class ASTLambda : public ASTNode {
  public:
-  ASTLambda(ASTNodeList *args, ASTNode *body, ASTNode *type)
+  ASTLambda(ASTNodeList *args, ASTNode *body, ASTType *type)
       : args_(args), body_(body), type_(type) {}
 
   virtual ~ASTLambda() { delete body_; }
@@ -290,7 +297,7 @@ class ASTLambda : public ASTNode {
 
   ASTNodeList *args_;
   ASTNode *body_;
-  ASTNode *type_;
+  ASTType *type_;
 
  private:
 };
@@ -328,18 +335,18 @@ void *Runner::alloc(int size) { return malloc(size); }
 
 void Runner::generateFunction(std::string name, ASTNodeList *args,
                               void (*body)(Runner *, RunnerStackFrame *),
-                              ASTNode *ret) {
+                              ASTType *ret) {
   ASTLambda *newLambda =
       new ASTLambda(args, new ASTNodeList({new ASTNativeFunction(body)}), ret);
-  ASTType *newTemplate = new ASTType("fun");
+  ASTType *newTemplate = new ASTBaseType("fun");
   void *ptr = this->stackFrame_->allocVariable(name, newTemplate, this);
   newLambda->run(this, stackFrame_, ptr);
 }
 void Runner::gc() {}
 
-class ASTPointer : public ASTNode {
+class ASTPointer : public ASTType {
  public:
-  ASTPointer(ASTNode *type) : type_(type) {}
+  ASTPointer(ASTType *type) : type_(type) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Pointer: " << std::endl;
@@ -357,11 +364,11 @@ class ASTPointer : public ASTNode {
   }
 
  private:
-  ASTNode *type_;
+  ASTType *type_;
 };
-class ASTArray : public ASTNode {
+class ASTArray : public ASTType {
  public:
-  ASTArray(ASTNode *type, ASTNode *size) : type_(type), size_(size) {}
+  ASTArray(ASTType *type, ASTNode *size) : type_(type), size_(size) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Array: " << std::endl;
@@ -379,16 +386,16 @@ class ASTArray : public ASTNode {
 
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
-    return "array";
+    return "array:" + type_->returnType(runner, stack);
   }
 
  private:
-  ASTNode *type_;
+  ASTType *type_;
   ASTNode *size_;
 };
 class ASTFunctionArg : public ASTNode {
  public:
-  ASTFunctionArg(ASTNode *type, const std::string &name)
+  ASTFunctionArg(ASTType *type, const std::string &name)
       : type_(type), name_(name) {}
 
   virtual void print(std::ostream &out, int level) const {
@@ -408,7 +415,7 @@ class ASTFunctionArg : public ASTNode {
   }
 
  private:
-  ASTNode *type_;
+  ASTType *type_;
   std::string name_;
 };
 
@@ -558,7 +565,7 @@ class ASTBinaryOp : public ASTNode {
 
 class ASTCast : public ASTNode {
  public:
-  ASTCast(ASTNode *value, ASTNode *type) : type_(type), value_(value) {}
+  ASTCast(ASTNode *value, ASTType *type) : value_(value), type_(type) {}
 
   virtual ~ASTCast() {
     delete type_;
@@ -615,13 +622,13 @@ class ASTCast : public ASTNode {
   }
 
  private:
-  ASTNode *type_;
   ASTNode *value_;
+  ASTType *type_;
 };
 
 class ASTVariableDecl : public ASTNode {
  public:
-  ASTVariableDecl(const std::string &name, ASTNode *type, ASTNode *value)
+  ASTVariableDecl(const std::string &name, ASTType *type, ASTNode *value)
       : name_(name), type_(type), value_(value) {}
 
   virtual ~ASTVariableDecl() {
@@ -654,7 +661,7 @@ class ASTVariableDecl : public ASTNode {
 
  private:
   std::string name_;
-  ASTNode *type_;
+  ASTType *type_;
   ASTNode *value_;
 };
 class ASTVariable : public ASTNode {
@@ -1060,7 +1067,7 @@ class Parser {
   }
 
   ASTNode *parseVariableDecl() {
-    ASTNode *type = parseType();
+    ASTType *type = parseType();
     std::string name = parseIdentifier();
     skipWhitespace();
     ASTNode *value;
@@ -1075,7 +1082,7 @@ class Parser {
     return new ASTVariableDecl(name, type, value);
   }
 
-  ASTNode *parseType() {
+  ASTType *parseType() {
     skipWhitespace();
     if (in_.peek() == EOF) {
       throw std::runtime_error("Unexpected EOF");
@@ -1086,7 +1093,7 @@ class Parser {
     if (in_.peek() == '<') {
       in_.get();
       skipWhitespace();
-      ASTNode *type = parseType();
+      ASTType *type = parseType();
       skipWhitespace();
       if (in_.peek() != '>') {
         throw std::runtime_error("Expected >");
@@ -1114,7 +1121,7 @@ class Parser {
       return new ASTArray(parseType(), size);
     }
     in_.seekg(newpos);
-    return new ASTType(name);
+    return new ASTBaseType(name);
   }
 
   ASTNodeList *parseGlobalBody() {
@@ -1220,7 +1227,7 @@ class Parser {
     }
     in_.get();
     skipWhitespace();
-    ASTNode *type = parseType();
+    ASTType *type = parseType();
     skipWhitespace();
     return new ASTFunctionArg(type, name);
   }
@@ -1258,12 +1265,12 @@ class Parser {
       std::string op = parseOperator();
       if (op == "->") {
         skipWhitespace();
-        ASTNode *type = parseType();
+        ASTType *type = parseType();
         return new ASTLambda(args, body, type);
       }
     }
     body->add(new ASTReturn(new ASTNumber(0)));
-    return new ASTLambda(args, body, new ASTType("void"));
+    return new ASTLambda(args, body, new ASTBaseType("void"));
   }
 
   ASTNode *parseExpression() {
@@ -1384,7 +1391,7 @@ class Parser {
       std::string op = parseOperator();
       if (op == "->") {
         skipWhitespace();
-        ASTNode *type = parseType();
+        ASTType *type = parseType();
         result = new ASTCast(result, type);
       } else {
         in_.seekg(oldpos);
@@ -1474,7 +1481,7 @@ int main() {
 
   runner.generateFunction("print",
                           new ASTNodeList({new ASTFunctionArg(
-                              new ASTPointer(new ASTType("char")), "str")}),
+                              new ASTPointer(new ASTBaseType("char")), "str")}),
                           [](Runner *runner, RunnerStackFrame *stackFrame) {
                             char *str = stackFrame->getVariable<char *>("str");
 
@@ -1483,8 +1490,8 @@ int main() {
   runner.generateFunction(
       "printintl",
       new ASTNodeList(
-          {new ASTFunctionArg(new ASTPointer(new ASTType("char")), "str"),
-           new ASTFunctionArg(new ASTType("i64"), "number")}),
+          {new ASTFunctionArg(new ASTPointer(new ASTBaseType("char")), "str"),
+           new ASTFunctionArg(new ASTBaseType("i64"), "number")}),
       [](Runner *runner, RunnerStackFrame *stackFrame) {
         char *str = stackFrame->getVariable<char *>("str");
         int number = stackFrame->getVariable<int>("number");
@@ -1493,7 +1500,7 @@ int main() {
       });
   runner.generateFunction(
       "printint",
-      new ASTNodeList({new ASTFunctionArg(new ASTType("i64"), "number")}),
+      new ASTNodeList({new ASTFunctionArg(new ASTBaseType("i64"), "number")}),
       [](Runner *runner, RunnerStackFrame *stackFrame) {
         int number = stackFrame->getVariable<int>("number");
 
@@ -1501,7 +1508,7 @@ int main() {
       });
   runner.generateFunction(
       "printdouble",
-      new ASTNodeList({new ASTFunctionArg(new ASTType("double"), "number")}),
+      new ASTNodeList({new ASTFunctionArg(new ASTBaseType("double"), "number")}),
       [](Runner *runner, RunnerStackFrame *stackFrame) {
         double number = stackFrame->getVariable<double>("number");
 
