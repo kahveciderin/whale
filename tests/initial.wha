@@ -1,10 +1,5 @@
-i32 seed = 0;
-fun seed = % seed:i32 {
-
-} -> double;
-
 fun main = %{
-    double v = 4 -> double;
-    v = v + 1;
-    printdouble(v);
+    i64 v = 12;
+    *i64 a = ref v;
+    printint(a -> i64);
 };

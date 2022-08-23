@@ -21,6 +21,7 @@ enum class ValueType {
   pointer
 };
 ValueType parseType(std::string type) {
+  type = type.substr(0, type.find(':'));
   if (type == "i32") {
     return ValueType::i32;
   } else if (type == "i64") {
@@ -50,6 +51,7 @@ class RunnerStackFrame;
 
 class ASTNode {
  public:
+  unsigned long pos_ = 0;
   virtual ~ASTNode() {}
   virtual void print(std::ostream &out, int level = 0) const = 0;
   std::string indent(int level) const {
@@ -62,7 +64,8 @@ class ASTNode {
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out = nullptr) const = 0;
 
-  virtual const std::string returnType() const = 0;
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const = 0;
 };
 
 class ASTType : public ASTNode {
@@ -109,7 +112,10 @@ class ASTType : public ASTNode {
     }
   }
 
-  virtual const std::string returnType() const { return name_; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return name_;
+  }
 
  private:
   std::string name_;
@@ -209,7 +215,10 @@ class ASTNodeList : public ASTNode {
     runner->gc();
   }
 
-  virtual const std::string returnType() const { return "void"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "void";
+  }
 
   std::vector<ASTNode *> nodes_;
 
@@ -231,7 +240,10 @@ class ASTTemplate : public ASTNode {
     *(int *)out = sizeof(void *);  // templates always have a pointer size
   }
 
-  virtual const std::string returnType() const { return "template"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "template";
+  }
 
  private:
   ASTNode *type_;
@@ -256,7 +268,10 @@ class ASTLambda : public ASTNode {
     *(const ASTLambda **)out = this;
   }
 
-  virtual const std::string returnType() const { return "lambda"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "fun";
+  }
 
   ASTNodeList *args_;
   ASTNode *body_;
@@ -281,7 +296,10 @@ class ASTNativeFunction : public ASTNode {
     function_(runner, stackFrame);
   }
 
-  virtual const std::string returnType() const { return "void"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "void";
+  }
 
  private:
   void (*function_)(Runner *, RunnerStackFrame *);
@@ -318,7 +336,10 @@ class ASTPointer : public ASTNode {
     *(int *)out = sizeof(void *);
   }
 
-  virtual const std::string returnType() const { return "pointer"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "pointer:" + type_->returnType(runner, stack);
+  }
 
  private:
   ASTNode *type_;
@@ -341,7 +362,10 @@ class ASTArray : public ASTNode {
     *(int *)out = sizeOutput * typeOutput;
   }
 
-  virtual const std::string returnType() const { return "array"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "array";
+  }
 
  private:
   ASTNode *type_;
@@ -363,7 +387,10 @@ class ASTFunctionArg : public ASTNode {
     *(void **)out = ptr;
   }
 
-  virtual const std::string returnType() const { return "void"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return type_->returnType(runner, stack);
+  }
 
  private:
   ASTNode *type_;
@@ -383,7 +410,10 @@ class ASTNumber : public ASTNode {
     *(long int *)out = value_;
   }
 
-  virtual const std::string returnType() const { return "i64"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "i64";
+  }
 
  private:
   long int value_;
@@ -396,7 +426,10 @@ class ASTDouble : public ASTNode {
     out << this->indent(level) << "Double: " << value_ << std::endl;
   }
 
-  virtual const std::string returnType() const { return "double"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "double";
+  }
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
@@ -419,7 +452,10 @@ class ASTString : public ASTNode {
     *(const char **)out = value_.c_str();
   }
 
-  virtual const std::string returnType() const { return "pointer"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "pointer:char";
+  }
 
  private:
   std::string value_;
@@ -494,7 +530,8 @@ class ASTBinaryOp : public ASTNode {
     }
   }
 
-  virtual const std::string returnType() const {
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
     return op_ == "/" ? "double" : "i64";
   }
 
@@ -521,31 +558,46 @@ class ASTCast : public ASTNode {
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
-    ValueType type = parseType(value_->returnType());
-    ValueType castType = parseType(type_->returnType());
-
-    std::cout << "Cast: " << value_->returnType() << " to "
-              << type_->returnType() << std::endl;
+    ValueType type = parseType(value_->returnType(runner, stackFrame));
+    ValueType castType = parseType(type_->returnType(runner, stackFrame));
 
     if ((type == ValueType::i32 || type == ValueType::i64) &&
         castType == ValueType::double_) {
       long int value;
       value_->run(runner, stackFrame, &value);
-      std::cout << "Casting to double from int: " << value << std::endl;
-      *(double *)out = value;
+      *(double *)out = (double)value;
     } else if (type == ValueType::double_ &&
                (castType == ValueType::i32 || castType == ValueType::i64)) {
-      std::cout << "Casting to int" << std::endl;
       double value;
       value_->run(runner, stackFrame, &value);
+      *(long int *)out = (long int)value;
+    } else if (type == ValueType::i32 && castType == ValueType::i64) {
+      long int value;
+      value_->run(runner, stackFrame, &value);
       *(long int *)out = value;
-    } else {
-      throw std::runtime_error("Unknown cast: " + value_->returnType() +
-                               " to " + type_->returnType());
+    } else if (type == ValueType::i64 && castType == ValueType::i32) {
+      long int value;
+      value_->run(runner, stackFrame, &value);
+      *(long int *)out = value;
+    } else if(type == ValueType::pointer && castType == ValueType::i64) {
+      void *value;
+      value_->run(runner, stackFrame, &value);
+      *(long int *)out = (long int)value;
+    } else if(type == ValueType::i64 && castType == ValueType::pointer) {
+      long int value;
+      value_->run(runner, stackFrame, &value);
+      *(void **)out = (void *)value;
+    }else {
+      throw std::runtime_error(
+          "Unknown cast: " + value_->returnType(runner, stackFrame) + " to " +
+          type_->returnType(runner, stackFrame));
     }
   }
 
-  virtual const std::string returnType() const { return type_->returnType(); }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return type_->returnType(runner, stack);
+  }
 
  private:
   ASTNode *type_;
@@ -570,10 +622,20 @@ class ASTVariableDecl : public ASTNode {
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
+    if (type_->returnType(runner, stackFrame) !=
+        value_->returnType(runner, stackFrame)) {
+      throw std::runtime_error(
+          "Type mismatch: " + type_->returnType(runner, stackFrame) +
+          " != " + value_->returnType(runner, stackFrame));
+    }
+
     void *ptr = stackFrame->allocVariable(name_, (ASTType *)type_, runner);
     value_->run(runner, stackFrame, ptr);
   }
-  virtual const std::string returnType() const { return "void"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "void";
+  }
 
  private:
   std::string name_;
@@ -590,13 +652,16 @@ class ASTVariable : public ASTNode {
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
-    auto it = stackFrame->getVariable(name_)->ptr_;
+    auto it = stackFrame->getVariable(name_);
 
     if (out != nullptr) {
-      *(unsigned long *)out = (unsigned long)*(unsigned long int **)it;
+      *(unsigned long *)out = (unsigned long)*(unsigned long int **)(it->ptr_);
     }
   }
-  virtual const std::string returnType() const { return "void"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return stack->getVariable(name_)->type_->returnType(runner, stack);
+  }
 
  private:
   std::string name_;
@@ -618,7 +683,10 @@ class ASTVariableAssign : public ASTNode {
     auto it = stackFrame->getVariable(name_)->ptr_;
     value_->run(runner, stackFrame, it);
   }
-  virtual const std::string returnType() const { return "void"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "void";
+  }
 
  private:
   std::string name_;
@@ -637,16 +705,34 @@ class ASTFunctionCall : public ASTNode {
     args_->print(out, level + 1);
   }
 
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
-                   void *out) const {
+  ASTLambda *getLambda(Runner *runner, RunnerStackFrame *stackFrame) const {
     void *lambdaAddress;
     pointer_->run(runner, stackFrame, &lambdaAddress);
 
     ASTLambda *lambda = (ASTLambda *)lambdaAddress;
+    return lambda;
+  }
 
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    ASTLambda *lambda = getLambda(runner, stackFrame);
     RunnerStackFrame newStackFrame(stackFrame);
     int i = 0;
+    if (lambda->args_->nodes_.size() != args_->nodes_.size()) {
+      throw std::runtime_error("Wrong number of arguments on function call: " +
+                               std::to_string(lambda->args_->nodes_.size()) +
+                               " expected, " +
+                               std::to_string(args_->nodes_.size()) + " given");
+    }
     for (auto arg : lambda->args_->nodes_) {
+      if (arg->returnType(runner, &newStackFrame) !=
+          args_->nodes_[i]->returnType(runner, &newStackFrame)) {
+        throw std::runtime_error(
+            "Type mismatch on function call: " +
+            arg->returnType(runner, &newStackFrame) + " expected, " +
+            args_->nodes_[i]->returnType(runner, &newStackFrame) + " given");
+      }
+
       void *variableAddress;
       arg->run(runner, &newStackFrame, &variableAddress);
       this->args_->nodes_[i]->run(runner, stackFrame, variableAddress);
@@ -668,7 +754,10 @@ class ASTFunctionCall : public ASTNode {
     runner->gc();
   }
 
-  virtual const std::string returnType() const { return "void"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return getLambda(runner, stack)->type_->returnType(runner, stack);
+  }
 
  private:
   ASTNode *pointer_;
@@ -705,7 +794,10 @@ class ASTIf : public ASTNode {
     }
   }
 
-  virtual const std::string returnType() const { return "void"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "void";
+  }
 
  private:
   ASTNode *condition_;
@@ -738,7 +830,10 @@ class ASTWhile : public ASTNode {
     }
   }
 
-  virtual const std::string returnType() const { return "void"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "void";
+  }
 
  private:
   ASTNode *condition_;
@@ -760,10 +855,118 @@ class ASTReturn : public ASTNode {
     value_->run(runner, stackFrame, out);
     runner->_return = true;
   }
-  virtual const std::string returnType() const { return "void"; }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "void";
+  }
 
  private:
   ASTNode *value_;
+};
+class ASTRef : public ASTNode {
+ public:
+  ASTRef(ASTNode *value) : value_(value) {}
+
+  virtual ~ASTRef() { delete value_; }
+
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Ref: " << std::endl;
+    value_->print(out, level + 1);
+  }
+
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    value_->run(runner, stackFrame, out);
+  }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "pointer:" + value_->returnType(runner, stack);
+  }
+
+ private:
+  ASTNode *value_;
+};
+class ASTDeref : public ASTNode {
+ public:
+  ASTDeref(ASTNode *value) : value_(value) {}
+
+  virtual ~ASTDeref() { delete value_; }
+
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Deref: " << std::endl;
+    value_->print(out, level + 1);
+  }
+
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    if (value_->returnType(runner, stackFrame).substr(0, 8) != "pointer:") {
+      throw std::runtime_error("Cannot dereference non-pointer type");
+    }
+
+    void *value;
+    value_->run(runner, stackFrame, &value);
+    if (out != nullptr) {
+      *(unsigned long *)out = *(unsigned long *)value;
+    }
+  }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    if (value_->returnType(runner, stack).substr(0, 8) == "pointer:") {
+      return value_->returnType(runner, stack).substr(8);
+    } else {
+      throw std::runtime_error("Cannot dereference non-pointer type");
+    }
+  }
+
+ private:
+  ASTNode *value_;
+};
+class ASTNull : public ASTNode {
+ public:
+  ASTNull() {}
+
+  virtual ~ASTNull() {}
+
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Null" << std::endl;
+  }
+
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    if (out != nullptr) {
+      *(unsigned long *)out = 0;
+    }
+  }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "pointer:void";
+  }
+
+ private:
+};
+class ASTBool : public ASTNode {
+ public:
+  ASTBool(bool value) : value_(value) {}
+
+  virtual ~ASTBool() {}
+
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Bool: " << value_ << std::endl;
+  }
+
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    if (out != nullptr) {
+      *(bool *)out = value_;
+    }
+  }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "bool";
+  }
+
+ private:
+  bool value_;
 };
 
 class Parser {
@@ -1106,6 +1309,18 @@ class Parser {
       } else if (name == "return" || name == "ret") {
         ASTNode *value = parseExpression();
         result = new ASTReturn(value);
+      } else if (name == "ref") {
+        ASTNode *value = parseExpression();
+        result = new ASTRef(value);
+      } else if (name == "deref") {
+        ASTNode *value = parseExpression();
+        result = new ASTDeref(value);
+      } else if (name == "null") {
+        result = new ASTNull();
+      } else if (name == "true") {
+        result = new ASTBool(true);
+      } else if (name == "false") {
+        result = new ASTBool(false);
       } else {
         // if (in_.peek() == '(') {
         //   in_.get();
@@ -1253,25 +1468,24 @@ int main() {
       "printintl",
       new ASTNodeList(
           {new ASTFunctionArg(new ASTPointer(new ASTType("char")), "str"),
-           new ASTFunctionArg(new ASTPointer(new ASTType("i32")), "number")}),
+           new ASTFunctionArg(new ASTType("i64"), "number")}),
       [](Runner *runner, RunnerStackFrame *stackFrame) {
         char *str = stackFrame->getVariable<char *>("str");
         int number = stackFrame->getVariable<int>("number");
 
         std::cout << str << number << std::endl;
       });
-  runner.generateFunction("printint",
-                          new ASTNodeList({new ASTFunctionArg(
-                              new ASTPointer(new ASTType("i32")), "number")}),
-                          [](Runner *runner, RunnerStackFrame *stackFrame) {
-                            int number = stackFrame->getVariable<int>("number");
+  runner.generateFunction(
+      "printint",
+      new ASTNodeList({new ASTFunctionArg(new ASTType("i64"), "number")}),
+      [](Runner *runner, RunnerStackFrame *stackFrame) {
+        int number = stackFrame->getVariable<int>("number");
 
-                            std::cout << number << std::endl;
-                          });
+        std::cout << number << std::endl;
+      });
   runner.generateFunction(
       "printdouble",
-      new ASTNodeList({new ASTFunctionArg(new ASTPointer(new ASTType("double")),
-                                          "number")}),
+      new ASTNodeList({new ASTFunctionArg(new ASTType("double"), "number")}),
       [](Runner *runner, RunnerStackFrame *stackFrame) {
         double number = stackFrame->getVariable<double>("number");
 
