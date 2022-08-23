@@ -236,7 +236,7 @@ class ASTBaseType : public ASTType {
  private:
   std::string name_;
 };
-
+class ASTFunctionArg;
 class Runner {
  public:
   bool _return = false;
@@ -245,7 +245,7 @@ class Runner {
   void run(void *out);
   void *alloc(int size);
 
-  void generateFunction(std::string name, ASTNodeList *args,
+  void generateFunction(std::string name, std::vector<ASTFunctionArg *> args,
                         void (*body)(Runner *, RunnerStackFrame *),
                         ASTType *ret = new ASTBaseType("void"));
 
@@ -528,7 +528,7 @@ Runner::Runner(ASTNode *ast) : ast_(ast) {
 void Runner::run(void *out) { ast_->run(this, this->stackFrame_, out); }
 void *Runner::alloc(int size) { return malloc(size); }
 
-void Runner::generateFunction(std::string name, ASTNodeList *args,
+void Runner::generateFunction(std::string name, std::vector<ASTFunctionArg *> args,
                               void (*body)(Runner *, RunnerStackFrame *),
                               ASTType *ret) {
   ASTLambda *newLambda =
@@ -919,13 +919,13 @@ class ASTFunctionCall : public ASTNode {
     ASTLambda *lambda = getLambda(runner, stackFrame);
     RunnerStackFrame newStackFrame(stackFrame);
     int i = 0;
-    if (lambda->args_->nodes_.size() != args_->nodes_.size()) {
+    if (lambda->args_.size() != args_->nodes_.size()) {
       throw std::runtime_error("Wrong number of arguments on function call: " +
-                               std::to_string(lambda->args_->nodes_.size()) +
+                               std::to_string(lambda->args_.size()) +
                                " expected, " +
                                std::to_string(args_->nodes_.size()) + " given");
     }
-    for (auto arg : lambda->args_->nodes_) {
+    for (auto arg : lambda->args_) {
       if (arg->returnType(runner, &newStackFrame) !=
           args_->nodes_[i]->returnType(runner, &newStackFrame)) {
         throw std::runtime_error(
