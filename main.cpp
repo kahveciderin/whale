@@ -880,26 +880,26 @@ class ASTReturn : public ASTNode {
 };
 class ASTRef : public ASTNode {
  public:
-  ASTRef(ASTNode *value) : value_(value) {}
-
-  virtual ~ASTRef() { delete value_; }
+  ASTRef(std::string &variable) : variable_(variable) {}
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Ref: " << std::endl;
-    value_->print(out, level + 1);
+    out << this->indent(level) << "Ref: " << variable_ << std::endl;
   }
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
-    value_->run(runner, stackFrame, out);
+    void *variableAddress = stackFrame->getVariable(variable_)->ptr_;
+    if (out != nullptr) {
+      *(unsigned long **)out = (unsigned long *)variableAddress;
+    }
   }
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
-    return "pointer:" + value_->returnType(runner, stack);
+    return "pointer:" + stack->getVariable(variable_)->type_->returnType(runner, stack);
   }
 
  private:
-  ASTNode *value_;
+  std::string variable_;
 };
 class ASTDeref : public ASTNode {
  public:
@@ -1325,7 +1325,8 @@ class Parser {
         ASTNode *value = parseExpression();
         result = new ASTReturn(value);
       } else if (name == "ref") {
-        ASTNode *value = parseExpression();
+        skipWhitespace();
+        std::string value = parseIdentifier();
         result = new ASTRef(value);
       } else if (name == "deref") {
         ASTNode *value = parseExpression();
