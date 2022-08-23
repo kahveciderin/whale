@@ -5,9 +5,24 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Module.h>
+
+std::unique_ptr<llvm::LLVMContext> TheContext;
+std::unique_ptr<llvm::IRBuilder<>> TheBuilder;
+std::unique_ptr<llvm::Module> Module;
+
+void init_module() {
+  TheContext = std::make_unique<llvm::LLVMContext>();
+  Module = std::make_unique<llvm::Module>("whale", *TheContext);
+  TheBuilder = std::make_unique<llvm::IRBuilder<>>(*TheContext);
+}
 
 enum class ValueType {
   i32,
