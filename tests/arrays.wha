@@ -1,0 +1,13 @@
+fun returnsarr = %{
+    ret [1, 4, 6];
+} -> [3]i64;
+
+fun main = %{
+    [2][3]i64 myArr1 = [
+        [1, 2, 3],
+        [4, 5, 6]
+    ];
+    [5]i64 myArr = [1, 4, 6, 2, 42];
+    i64 val = myArr[2];
+    printint(val);
+};

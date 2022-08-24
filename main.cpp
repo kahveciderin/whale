@@ -1,5 +1,7 @@
 #include <cctype>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -19,10 +21,12 @@ enum class ValueType {
   fun,
   bool_,
   pointer,
+  template_,
   array
 };
 ValueType parseType(std::string type) {
   type = type.substr(0, type.find(':'));
+  type = type.substr(0, type.find('-'));
   if (type == "i32") {
     return ValueType::i32;
   } else if (type == "i64") {
@@ -41,10 +45,49 @@ ValueType parseType(std::string type) {
     return ValueType::bool_;
   } else if (type == "pointer") {
     return ValueType::pointer;
+  } else if (type == "template") {
+    return ValueType::template_;
   } else if (type == "array") {
     return ValueType::array;
   } else {
     throw std::runtime_error("Unknown type: " + type);
+  }
+}
+size_t sizeOfType(std::string type) {
+  ValueType typeVal = parseType(type);
+  switch (typeVal) {
+    case ValueType::i32:
+      return sizeof(int);
+      break;
+    case ValueType::i64:
+      return sizeof(long int);
+      break;
+    case ValueType::fun:
+      return sizeof(void *);
+      break;
+    case ValueType::float_:
+      return sizeof(float);
+      break;
+    case ValueType::double_:
+      return sizeof(double);
+      break;
+    case ValueType::void_:
+      return sizeof(char);
+      break;
+    case ValueType::bool_:
+      return sizeof(bool);
+      break;
+    case ValueType::char_:
+      return sizeof(char);
+      break;
+    case ValueType::pointer:
+      return sizeof(void *);
+      break;
+    case ValueType::array:
+      return sizeof(void *);
+      break;
+    default:
+      throw std::runtime_error("Unknown type: " + type);
   }
 }
 
@@ -87,38 +130,7 @@ class ASTBaseType : public ASTType {
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
-    ValueType type = parseType(name_);
-    switch (type) {
-      case ValueType::i32:
-        *(int *)out = sizeof(int);
-        break;
-      case ValueType::i64:
-        *(int *)out = sizeof(long int);
-        break;
-      case ValueType::fun:
-        *(int *)out = sizeof(void *);
-        break;
-      case ValueType::float_:
-        *(int *)out = sizeof(float);
-        break;
-      case ValueType::double_:
-        *(int *)out = sizeof(double);
-        break;
-      case ValueType::void_:
-        *(int *)out = sizeof(char);
-        break;
-      case ValueType::bool_:
-        *(int *)out = sizeof(bool);
-        break;
-      case ValueType::char_:
-        *(int *)out = sizeof(char);
-        break;
-      case ValueType::pointer:
-        *(int *)out = sizeof(void *);
-        break;
-      default:
-        throw std::runtime_error("Unknown type: " + name_);
-    }
+    *(int *)out = sizeOfType(name_);
   }
 
   virtual const std::string returnType(Runner *runner,
@@ -237,6 +249,62 @@ class ASTNodeList : public ASTNode {
   std::vector<ASTNode *> nodes_;
 
  private:
+};
+class ASTArrayLiteral : public ASTType {
+ public:
+  ASTArrayLiteral(ASTNodeList *list, unsigned long pos = 0)
+      : ASTType(pos), list_(list) {}
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "ArrayLiteral: " << std::endl;
+    list_->print(out, level + 1);
+  }
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    std::string type = "";
+
+    for (auto node : this->list_->nodes_) {
+      if (type == "") {
+        type = node->returnType(runner, stackFrame);
+      } else {
+        if (type != node->returnType(runner, stackFrame)) {
+          runner->errorAt(node,
+                          "Array elements must be of the same type: " + type +
+                              " != " + node->returnType(runner, stackFrame));
+        }
+      }
+    }
+
+    int size = sizeOfType(type);
+    int allocs = size * this->list_->nodes_.size();
+    void *value = runner->alloc(allocs);
+    for (unsigned long i = 0; i < this->list_->nodes_.size(); ++i) {
+      this->list_->nodes_[i]->run(runner, stackFrame,
+                                 (char *)value + i * size);
+    }
+
+    *(void **)out = value;
+  }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    std::string type = "";
+
+    for (auto node : this->list_->nodes_) {
+      if (type == "") {
+        type = node->returnType(runner, stack);
+      } else {
+        if (type != node->returnType(runner, stack)) {
+          runner->errorAt(node,
+                          "Array elements must be of the same type: " + type +
+                              " != " + node->returnType(runner, stack));
+        }
+      }
+    }
+
+    return "array-" + std::to_string(list_->nodes_.size()) + ":" + type;
+  }
+
+ private:
+  ASTNodeList *list_;
 };
 
 class ASTTemplate : public ASTType {
@@ -425,7 +493,10 @@ class ASTArray : public ASTType {
 
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
-    return "array:" + type_->returnType(runner, stack);
+    int sizeOutput;
+    size_->run(runner, stack, &sizeOutput);
+    return "array-" + std::to_string(sizeOutput) + ":" +
+           type_->returnType(runner, stack);
   }
 
  private:
@@ -1052,6 +1123,48 @@ class ASTBool : public ASTNode {
  private:
   bool value_;
 };
+class ASTArrayAccess : public ASTNode {
+ public:
+  ASTArrayAccess(ASTNode *array, ASTNode *index, unsigned long pos = 0)
+      : ASTNode(pos), array_(array), index_(index) {}
+  virtual ~ASTArrayAccess() {
+    delete array_;
+    delete index_;
+  }
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "ArrayAccess: " << std::endl;
+    array_->print(out, level + 1);
+    index_->print(out, level + 1);
+  }
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    if(array_->returnType(runner, stackFrame).substr(0, 6) != "array-"){
+      runner->errorAt(this, "Cannot access non-array type");
+    }
+    
+    std::string arrayType = array_->returnType(runner, stackFrame);
+    arrayType = arrayType.substr(arrayType.find(":") + 1);
+
+    void *array, *array2;
+    array_->run(runner, stackFrame, &array);
+    array2 = array; // there is a bug here
+    int index;
+    index_->run(runner, stackFrame, &index);
+    if (out != nullptr) {
+      std::memcpy(out, (char *)array2 + index * sizeOfType(arrayType), sizeOfType(arrayType));
+    }
+  }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    if(array_->returnType(runner, stack).substr(0, 6) != "array-"){
+      runner->errorAt(this, "Cannot access non-array type");
+    }
+    return array_->returnType(runner, stack).substr(array_->returnType(runner, stack).find(':') + 1);
+  }
+ private:
+  ASTNode *array_;
+  ASTNode *index_;
+};
 
 class Parser {
  public:
@@ -1339,11 +1452,32 @@ class Parser {
 
   ASTNode *parseExpression() {
     ASTNode *result;
-
+    skipWhitespace();
     if (in_.peek() == '%') {
       skipWhitespace();
       result = parseLambda();
       skipWhitespace();
+    } else if (in_.peek() == '[') {
+      std::cout << "Array" << std::endl;
+      in_.get();
+      skipWhitespace();
+      ASTNodeList *body = new ASTNodeList(in_.tellg());
+      while (in_.peek() != ']') {
+        skipWhitespace();
+        body->add(parseExpression());
+        skipWhitespace();
+        if (in_.peek() == ',') {
+          in_.get();
+        } else {
+          if (in_.peek() != ']') {
+            throw std::runtime_error("Expected ',' or ']'");
+          }
+        }
+        skipWhitespace();
+      }
+      in_.get();
+      skipWhitespace();
+      result = new ASTArrayLiteral(body, in_.tellg());
     } else if (isValidIdentifierChar(in_.peek())) {
       std::string name = parseIdentifier();
 
@@ -1433,28 +1567,30 @@ class Parser {
       result = new ASTFunctionCall(result, args, in_.tellg());
     }
     skipWhitespace();
-    if (in_.peek() == '-') {
+    while(in_.peek() == '[') {
+      in_.get();
+      ASTNode *index = parseExpression();
+      skipWhitespace();
+      if (in_.get() != ']') {
+        throw std::runtime_error("Expected ']'");
+      }
+      skipWhitespace();
+      result = new ASTArrayAccess(result, index, in_.tellg());
+    }
+    while (isValidOperatorChar(in_.peek())) {
       std::streampos oldpos = in_.tellg();
       std::string op = parseOperator();
-      if (op == "->") {
+      if (op == "=") {
+        in_.seekg(oldpos);
+        break;
+      } else if (op == "->") {
         skipWhitespace();
         ASTType *type = parseType();
         result = new ASTCast(result, type, in_.tellg());
       } else {
-        in_.seekg(oldpos);
-      }
-    }
-    skipWhitespace();
-    while (isValidOperatorChar(in_.peek())) {
-      std::streampos oldpos = in_.tellg();
-      std::string op = parseOperator();
-      if (op != "=") {
         skipWhitespace();
         auto right = parseExpression();
         result = new ASTBinaryOp(op, result, right, in_.tellg());
-      } else {
-        in_.seekg(oldpos);
-        break;
       }
     }
     return result;
@@ -1524,7 +1660,7 @@ int main() {
   try {
     ast = parser.parse();
   } catch (std::runtime_error &e) {
-    errorWithMessage(e.what(), code, (int)code.tellg() - 2);
+    errorWithMessage(e.what(), code, (int)code.tellg());
   }
 
   ast->print(std::cout);
