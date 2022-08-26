@@ -1,8 +1,5 @@
 fun main = %{
-    [4]i64 myArr =  1..5;
-    [4]i64 myArr2 = [x * 2 for x:1..5];
-    
-    for val:myArr2 {
-        printint(val);
-    };
+    *char text = "Hello, World!";
+    i64 var = text[0] -> i64;
+    printint(var);
 };

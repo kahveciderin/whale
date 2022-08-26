@@ -724,7 +724,17 @@ class ASTCast : public ASTNode {
       long int value;
       value_->run(runner, stackFrame, &value);
       *(void **)out = (void *)value;
-    } else {
+    } else if (type == ValueType::char_ && castType == ValueType::i64) {
+      char value;
+      value_->run(runner, stackFrame, &value);
+      *(long int *)out = (long int)value;
+    } else if (type == ValueType::i64 && castType == ValueType::char_) {
+      long int value;
+      value_->run(runner, stackFrame, &value);
+      *(char *)out = (char)value;
+    }
+    
+    else {
       runner->errorAt(
           this, "Unknown cast: " + value_->returnType(runner, stackFrame) +
                     " to " + type_->returnType(runner, stackFrame));
@@ -1142,8 +1152,8 @@ class ASTArrayAccess : public ASTNode {
   }
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
-    if (array_->returnType(runner, stackFrame).substr(0, 6) != "array-") {
-      runner->errorAt(this, "Cannot access non-array type");
+    if (array_->returnType(runner, stackFrame).substr(0, 6) != "array-" && array_->returnType(runner, stackFrame).substr(0, 7) != "pointer") {
+      runner->errorAt(this, "Cannot access non-accessible type");
     }
 
     std::string arrayType = array_->returnType(runner, stackFrame);
@@ -1161,9 +1171,10 @@ class ASTArrayAccess : public ASTNode {
   }
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
-    if (array_->returnType(runner, stack).substr(0, 6) != "array-") {
-      runner->errorAt(this, "Cannot access non-array type");
+    if (array_->returnType(runner, stack).substr(0, 6) != "array-" && array_->returnType(runner, stack).substr(0, 7) != "pointer") {
+      runner->errorAt(this, "Cannot access non-accessible type");
     }
+
     return array_->returnType(runner, stack)
         .substr(array_->returnType(runner, stack).find(':') + 1);
   }
