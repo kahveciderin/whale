@@ -998,12 +998,16 @@ class ASTReturn : public ASTNode {
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Return: " << std::endl;
-    value_->print(out, level + 1);
+    if(value_ != nullptr) {
+      value_->print(out, level + 1);
+    }
   }
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
-    value_->run(runner, stackFrame, out);
+    if (value_) {
+      value_->run(runner, stackFrame, out);
+    }
     runner->_return = true;
   }
   virtual const std::string returnType(Runner *runner,
@@ -1171,14 +1175,17 @@ class ASTArrayAccess : public ASTNode {
 
 ASTType *typeFromTypeRep(std::string type) {
   if (type.substr(0, 6) == "array-") {
-    return new ASTArray(typeFromTypeRep(type.substr(type.find(':') + 1)),
-                           new ASTNumber(std::stoi(
-        type.substr(type.find('-') + 1, type.find(':') - type.find('-') - 1))));
-  }else if(type.substr(0, 7) == "pointer"){
+    return new ASTArray(
+        typeFromTypeRep(type.substr(type.find(':') + 1)),
+        new ASTNumber(std::stoi(type.substr(
+            type.find('-') + 1, type.find(':') - type.find('-') - 1))));
+  } else if (type.substr(0, 7) == "pointer") {
     return new ASTPointer(typeFromTypeRep(type.substr(type.find(':') + 1)));
-  }else if(type.substr(0, 9) == "template-"){
-    return new ASTTemplate(typeFromTypeRep(type.substr(type.find(':') + 1)), type.substr(type.find('-') + 1, type.find(':') - type.find('-') - 1));
-  }else{
+  } else if (type.substr(0, 9) == "template-") {
+    return new ASTTemplate(
+        typeFromTypeRep(type.substr(type.find(':') + 1)),
+        type.substr(type.find('-') + 1, type.find(':') - type.find('-') - 1));
+  } else {
     return new ASTBaseType(type);
   }
 }
@@ -1614,8 +1621,14 @@ class Parser {
         skipWhitespace();
         result = new ASTForIn(varName, array, body, in_.tellg());
       } else if (name == "return" || name == "ret") {
-        ASTNode *value = parseExpression();
-        result = new ASTReturn(value, in_.tellg());
+        skipWhitespace();
+        if (in_.peek() == ';') {
+          return new ASTReturn(nullptr, in_.tellg());
+        } else {
+          ASTNode *value = parseExpression();
+          result = new ASTReturn(value, in_.tellg());
+        }
+        skipWhitespace();
       } else if (name == "ref") {
         skipWhitespace();
         std::string value = parseIdentifier();

@@ -1,7 +1,3 @@
 fun main = %{
-    [4]i64 vals = [1, 3, 2, 7];
-
-    for val:vals {
-        printint(val);
-    };
+    return;
 };
