@@ -998,7 +998,7 @@ class ASTReturn : public ASTNode {
 
   virtual void print(std::ostream &out, int level) const {
     out << this->indent(level) << "Return: " << std::endl;
-    if(value_ != nullptr) {
+    if (value_ != nullptr) {
       value_->print(out, level + 1);
     }
   }
@@ -1238,6 +1238,114 @@ class ASTForIn : public ASTNode {
   std::string variable_;
   ASTNode *array_;
   ASTNode *body_;
+};
+class ASTArrayComprehension : public ASTNode {
+ public:
+  ASTArrayComprehension(std::string &variable, ASTNode *array, ASTNode *body,
+                        unsigned long pos = 0)
+      : ASTNode(pos), variable_(variable), array_(array), body_(body) {}
+  virtual ~ASTArrayComprehension() {
+    delete array_;
+    delete body_;
+  }
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "ArrayComprehension: " << variable_
+        << std::endl;
+    array_->print(out, level + 1);
+    body_->print(out, level + 1);
+  }
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    std::string arrayReturn = array_->returnType(runner, stackFrame);
+    if (arrayReturn.substr(0, 6) != "array-") {
+      runner->errorAt(this, "Cannot iterate non-array type");
+    }
+    int arrayLength = std::stoi(
+        arrayReturn.substr(arrayReturn.find('-') + 1,
+                           arrayReturn.find(':') - arrayReturn.find('-') - 1));
+    std::string returnType = arrayReturn.substr(arrayReturn.find(':') + 1);
+
+    int size = sizeOfType(returnType);
+    int allocs = size * arrayLength;
+    void *value = runner->alloc(allocs);
+
+    void *array, *array2;
+    array_->run(runner, stackFrame, &array);
+    array2 = array;  // there is a bug here
+    RunnerStackFrame newStackFrame(stackFrame);
+
+    ASTType *elementType =
+        typeFromTypeRep(arrayReturn.substr(arrayReturn.find(':') + 1));
+    void *forOut = newStackFrame.allocVariable(variable_, elementType, runner);
+    for (int i = 0; i < arrayLength; i++) {
+      std::memcpy(forOut,
+                  (char *)array2 + i * sizeOfType(arrayReturn.substr(
+                                           arrayReturn.find(":") + 1)),
+                  sizeOfType(arrayReturn.substr(arrayReturn.find(":") + 1)));
+      body_->run(runner, &newStackFrame, ((char *)value) + i * size);
+    }
+
+    *(void **)out = value;
+  }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    std::string arrayReturn = array_->returnType(runner, stack);
+    RunnerStackFrame newStackFrame(stack);
+    ASTType *elementType =
+        typeFromTypeRep(arrayReturn.substr(arrayReturn.find(':') + 1));
+    newStackFrame.allocVariable(variable_, elementType, runner);
+    std::string type =
+        std::string("array-") +
+        arrayReturn.substr(arrayReturn.find('-') + 1,
+                           arrayReturn.find(':') - arrayReturn.find('-') - 1) +
+        ":" + body_->returnType(runner, &newStackFrame);
+    return type;
+  }
+
+ private:
+  std::string variable_;
+  ASTNode *array_;
+  ASTNode *body_;
+};
+class ASTRange : public ASTNode {
+ public:
+  ASTRange(ASTNode *start, ASTNode *end, unsigned long pos = 0)
+      : ASTNode(pos), start_(start), end_(end) {}
+  virtual ~ASTRange() {
+    delete start_;
+    delete end_;
+  }
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Range: " << std::endl;
+    start_->print(out, level + 1);
+    end_->print(out, level + 1);
+  }
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    long start, end;
+    start_->run(runner, stackFrame, &start);
+    end_->run(runner, stackFrame, &end);
+    int length = end - start;
+    void *value = runner->alloc(length * sizeof(long));
+    for (int i = 0; i < length; i++) {
+      *((long *)value + i) = start + i;
+    }
+    *(void **)out = value;
+  }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    long start, end;
+    start_->run(runner, stack, &start);
+    end_->run(runner, stack, &end);
+    int length = end - start;
+    std::cout << "type: " << std::endl;
+    std::string type = "array-" + std::to_string(length) + ":i64";
+    return type;
+  }
+
+ private:
+  ASTNode *start_;
+  ASTNode *end_;
 };
 
 class Parser {
@@ -1532,26 +1640,56 @@ class Parser {
       result = parseLambda();
       skipWhitespace();
     } else if (in_.peek() == '[') {
-      std::cout << "Array" << std::endl;
       in_.get();
       skipWhitespace();
-      ASTNodeList *body = new ASTNodeList(in_.tellg());
-      while (in_.peek() != ']') {
-        skipWhitespace();
-        body->add(parseExpression());
-        skipWhitespace();
-        if (in_.peek() == ',') {
-          in_.get();
-        } else {
-          if (in_.peek() != ']') {
-            throw std::runtime_error("Expected ',' or ']'");
-          }
-        }
+      std::streampos oldpos = in_.tellg();
+      ASTNode *expr;
+      if (in_.peek() != ']') {
+        expr = parseExpression();
         skipWhitespace();
       }
-      in_.get();
-      skipWhitespace();
-      result = new ASTArrayLiteral(body, in_.tellg());
+      if (in_.peek() == ',' || in_.peek() == ']') {
+        in_.seekg(oldpos);
+        ASTNodeList *body = new ASTNodeList(in_.tellg());
+        while (in_.peek() != ']') {
+          skipWhitespace();
+          body->add(parseExpression());
+          skipWhitespace();
+          if (in_.peek() == ',') {
+            in_.get();
+          } else {
+            if (in_.peek() != ']') {
+              throw std::runtime_error("Expected ',' or ']'");
+            }
+          }
+          skipWhitespace();
+        }
+        in_.get();
+        skipWhitespace();
+        result = new ASTArrayLiteral(body, in_.tellg());
+      } else {
+        std::string op = parseIdentifier();
+        if (op == "for") {
+          skipWhitespace();
+          std::string varName = parseIdentifier();
+          skipWhitespace();
+          if (in_.get() != ':') {
+            throw std::runtime_error("Expected ':'");
+          }
+          skipWhitespace();
+          ASTNode *array = parseExpression();
+          skipWhitespace();
+          if (in_.get() != ']') {
+            throw std::runtime_error("Expected ']'");
+          }
+          skipWhitespace();
+          result = new ASTArrayComprehension(varName, array, expr, in_.tellg());
+
+        } else {
+          throw std::runtime_error(
+              op + " is not a valid array comprehension operator");
+        }
+      }
     } else if (isValidIdentifierChar(in_.peek())) {
       std::string name = parseIdentifier();
 
@@ -1677,9 +1815,20 @@ class Parser {
       skipWhitespace();
       result = new ASTArrayAccess(result, index, in_.tellg());
     }
-    while (isValidOperatorChar(in_.peek())) {
+    while (isValidOperatorChar(in_.peek()) || in_.peek() == '.') {
       std::streampos oldpos = in_.tellg();
       std::string op = parseOperator();
+      if (in_.peek() == '.') {
+        in_.get();
+        if (in_.peek() == '.') {
+          in_.get();
+          op = "..";
+          skipWhitespace();
+        } else {
+          in_.seekg(oldpos);
+          break;
+        }
+      }
       if (op == "=") {
         in_.seekg(oldpos);
         break;
@@ -1687,6 +1836,10 @@ class Parser {
         skipWhitespace();
         ASTType *type = parseType();
         result = new ASTCast(result, type, in_.tellg());
+      } else if (op == "..") {
+        skipWhitespace();
+        ASTNode *end = parseExpression();
+        result = new ASTRange(result, end, in_.tellg());
       } else {
         skipWhitespace();
         auto right = parseExpression();
@@ -1714,8 +1867,13 @@ class Parser {
       unsigned char isFloat = 0;
       while (isdigit(in_.peek()) || in_.peek() == '.') {
         if (in_.peek() == '.' && !isFloat) {
-          isFloat = 1;
+          std::streampos oldpos = in_.tellg();
           in_.get();
+          if (in_.peek() == '.') {
+            in_.seekg(oldpos);
+            break;
+          }
+          isFloat = 1;
         } else {
           if (isFloat) {
             value += (in_.get() - '0') / std::pow(10.0, isFloat);
