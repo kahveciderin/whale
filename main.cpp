@@ -116,7 +116,7 @@ class ASTNode {
 };
 class ASTType : public ASTNode {
  public:
-  ASTType(unsigned long pos) : ASTNode(pos) {}
+  ASTType(unsigned long pos = 0) : ASTNode(pos) {}
 };
 
 class ASTBaseType : public ASTType {
@@ -278,8 +278,7 @@ class ASTArrayLiteral : public ASTType {
     int allocs = size * this->list_->nodes_.size();
     void *value = runner->alloc(allocs);
     for (unsigned long i = 0; i < this->list_->nodes_.size(); ++i) {
-      this->list_->nodes_[i]->run(runner, stackFrame,
-                                 (char *)value + i * size);
+      this->list_->nodes_[i]->run(runner, stackFrame, (char *)value + i * size);
     }
 
     *(void **)out = value;
@@ -499,8 +498,9 @@ class ASTArray : public ASTType {
            type_->returnType(runner, stack);
   }
 
- private:
   ASTType *type_;
+
+ private:
   ASTNode *size_;
 };
 class ASTFunctionArg : public ASTNode {
@@ -1138,32 +1138,99 @@ class ASTArrayAccess : public ASTNode {
   }
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
-    if(array_->returnType(runner, stackFrame).substr(0, 6) != "array-"){
+    if (array_->returnType(runner, stackFrame).substr(0, 6) != "array-") {
       runner->errorAt(this, "Cannot access non-array type");
     }
-    
+
     std::string arrayType = array_->returnType(runner, stackFrame);
     arrayType = arrayType.substr(arrayType.find(":") + 1);
 
     void *array, *array2;
     array_->run(runner, stackFrame, &array);
-    array2 = array; // there is a bug here
+    array2 = array;  // there is a bug here
     int index;
     index_->run(runner, stackFrame, &index);
     if (out != nullptr) {
-      std::memcpy(out, (char *)array2 + index * sizeOfType(arrayType), sizeOfType(arrayType));
+      std::memcpy(out, (char *)array2 + index * sizeOfType(arrayType),
+                  sizeOfType(arrayType));
     }
   }
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
-    if(array_->returnType(runner, stack).substr(0, 6) != "array-"){
+    if (array_->returnType(runner, stack).substr(0, 6) != "array-") {
       runner->errorAt(this, "Cannot access non-array type");
     }
-    return array_->returnType(runner, stack).substr(array_->returnType(runner, stack).find(':') + 1);
+    return array_->returnType(runner, stack)
+        .substr(array_->returnType(runner, stack).find(':') + 1);
   }
+
  private:
   ASTNode *array_;
   ASTNode *index_;
+};
+
+ASTType *typeFromTypeRep(std::string type) {
+  if (type.substr(0, 6) == "array-") {
+    return new ASTArray(typeFromTypeRep(type.substr(type.find(':') + 1)),
+                           new ASTNumber(std::stoi(
+        type.substr(type.find('-') + 1, type.find(':') - type.find('-') - 1))));
+  }else if(type.substr(0, 7) == "pointer"){
+    return new ASTPointer(typeFromTypeRep(type.substr(type.find(':') + 1)));
+  }else if(type.substr(0, 9) == "template-"){
+    return new ASTTemplate(typeFromTypeRep(type.substr(type.find(':') + 1)), type.substr(type.find('-') + 1, type.find(':') - type.find('-') - 1));
+  }else{
+    return new ASTBaseType(type);
+  }
+}
+
+class ASTForIn : public ASTNode {
+ public:
+  ASTForIn(std::string &variable, ASTNode *array, ASTNode *body,
+           unsigned long pos = 0)
+      : ASTNode(pos), variable_(variable), array_(array), body_(body) {}
+  virtual ~ASTForIn() {
+    delete array_;
+    delete body_;
+  }
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "ForIn: " << variable_ << std::endl;
+    array_->print(out, level + 1);
+    body_->print(out, level + 1);
+  }
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    std::string arrayReturn = array_->returnType(runner, stackFrame);
+    if (arrayReturn.substr(0, 6) != "array-") {
+      runner->errorAt(this, "Cannot iterate non-array type");
+    }
+    int arrayLength = std::stoi(
+        arrayReturn.substr(arrayReturn.find('-') + 1,
+                           arrayReturn.find(':') - arrayReturn.find('-') - 1));
+    void *array, *array2;
+    array_->run(runner, stackFrame, &array);
+    array2 = array;  // there is a bug here
+    RunnerStackFrame newStackFrame(stackFrame);
+
+    ASTType *elementType =
+        typeFromTypeRep(arrayReturn.substr(arrayReturn.find(':') + 1));
+    void *forOut = newStackFrame.allocVariable(variable_, elementType, runner);
+    for (int i = 0; i < arrayLength; i++) {
+      std::memcpy(forOut,
+                  (char *)array2 + i * sizeOfType(arrayReturn.substr(
+                                           arrayReturn.find(":") + 1)),
+                  sizeOfType(arrayReturn.substr(arrayReturn.find(":") + 1)));
+      body_->run(runner, &newStackFrame);
+    }
+  }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "void";
+  }
+
+ private:
+  std::string variable_;
+  ASTNode *array_;
+  ASTNode *body_;
 };
 
 class Parser {
@@ -1207,8 +1274,8 @@ class Parser {
                            bool shouldIncludeSemicolon = false) {
     return i == '+' || i == '-' || i == '*' || i == '/' || i == '%' ||
            i == '^' || i == '&' || i == '|' || i == '!' || i == '~' ||
-           i == '<' || i == '>' || i == '=' || i == '?' || i == ':' ||
-           (shouldIncludeSemicolon && i == ';');
+           i == '<' || i == '>' || i == '=' || i == '?' ||
+           (shouldIncludeSemicolon && (i == ';' || i == ':'));
   }
   std::string parseIdentifier() {
     skipWhitespace();
@@ -1526,6 +1593,26 @@ class Parser {
         }
         skipWhitespace();
         result = new ASTWhile(condition, body, in_.tellg());
+      } else if (name == "for") {
+        skipWhitespace();
+        std::string varName = parseIdentifier();
+        skipWhitespace();
+        if (in_.get() != ':') {
+          throw std::runtime_error("Expected ':'");
+        }
+        skipWhitespace();
+        ASTNode *array = parseExpression();
+        skipWhitespace();
+        if (in_.get() != '{') {
+          throw std::runtime_error("Expected '{'");
+        }
+        skipWhitespace();
+        ASTNode *body = parseBody();
+        if (in_.get() != '}') {
+          throw std::runtime_error("Expected '}'");
+        }
+        skipWhitespace();
+        result = new ASTForIn(varName, array, body, in_.tellg());
       } else if (name == "return" || name == "ret") {
         ASTNode *value = parseExpression();
         result = new ASTReturn(value, in_.tellg());
@@ -1567,7 +1654,7 @@ class Parser {
       result = new ASTFunctionCall(result, args, in_.tellg());
     }
     skipWhitespace();
-    while(in_.peek() == '[') {
+    while (in_.peek() == '[') {
       in_.get();
       ASTNode *index = parseExpression();
       skipWhitespace();
