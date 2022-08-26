@@ -1,5 +1,7 @@
 fun main = %{
-    *char text = "Hello, World!";
-    i64 var = text[0] -> i64;
-    printint(var);
+    [4]char text = ['\ndsad', 'b', 'c', 'd'];
+    
+    for val:text {
+        printint(val -> i64);
+    };
 };

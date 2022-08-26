@@ -551,6 +551,24 @@ class ASTNumber : public ASTNode {
  private:
   long int value_;
 };
+class ASTChar : public ASTNode {
+ public:
+  ASTChar(char value, unsigned long pos = 0)
+      : ASTNode(pos), value_(value) {}
+  virtual void print(std::ostream &out, int level) const {
+    out << this->indent(level) << "Char: " << value_ << std::endl;
+  }
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    *(char *)out = value_;
+  }
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return "char";
+  }
+ private:
+  char value_;
+};
 class ASTDouble : public ASTNode {
  public:
   ASTDouble(double value, unsigned long pos = 0)
@@ -733,7 +751,7 @@ class ASTCast : public ASTNode {
       value_->run(runner, stackFrame, &value);
       *(char *)out = (char)value;
     }
-    
+
     else {
       runner->errorAt(
           this, "Unknown cast: " + value_->returnType(runner, stackFrame) +
@@ -1152,7 +1170,8 @@ class ASTArrayAccess : public ASTNode {
   }
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
-    if (array_->returnType(runner, stackFrame).substr(0, 6) != "array-" && array_->returnType(runner, stackFrame).substr(0, 7) != "pointer") {
+    if (array_->returnType(runner, stackFrame).substr(0, 6) != "array-" &&
+        array_->returnType(runner, stackFrame).substr(0, 7) != "pointer") {
       runner->errorAt(this, "Cannot access non-accessible type");
     }
 
@@ -1171,7 +1190,8 @@ class ASTArrayAccess : public ASTNode {
   }
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
-    if (array_->returnType(runner, stack).substr(0, 6) != "array-" && array_->returnType(runner, stack).substr(0, 7) != "pointer") {
+    if (array_->returnType(runner, stack).substr(0, 6) != "array-" &&
+        array_->returnType(runner, stack).substr(0, 7) != "pointer") {
       runner->errorAt(this, "Cannot access non-accessible type");
     }
 
@@ -1403,6 +1423,27 @@ class Parser {
            i == '<' || i == '>' || i == '=' || i == '?' ||
            (shouldIncludeSemicolon && (i == ';' || i == ':'));
   }
+  std::string parseString(std::string input){
+    std::string result;
+    for (long unsigned int i = 0; i < input.length(); i++) {
+      if (input[i] == '\\') {
+        i++;
+        if (input[i] == 'n') {
+          result += '\n';
+        } else if (input[i] == 't') {
+          result += '\t';
+        } else if (input[i] == '\\') {
+          result += '\\';
+        } else {
+          throw std::runtime_error("Invalid escape sequence");
+        }
+      } else {
+        result += input[i];
+      }
+    }
+    return result;
+  }
+
   std::string parseIdentifier() {
     skipWhitespace();
     std::string result;
@@ -1554,6 +1595,7 @@ class Parser {
 
       in_.seekg(oldpos);
 
+      skipWhitespace();
       if (expressionType == VAR_DECLARATION) {
         result->add(parseVariableDecl());
         if (in_.get() != ';') {
@@ -1644,6 +1686,7 @@ class Parser {
   }
 
   ASTNode *parseExpression() {
+    skipWhitespace();
     ASTNode *result;
     skipWhitespace();
     if (in_.peek() == '%') {
@@ -1654,7 +1697,7 @@ class Parser {
       in_.get();
       skipWhitespace();
       std::streampos oldpos = in_.tellg();
-      ASTNode *expr;
+      ASTNode *expr = nullptr;
       if (in_.peek() != ']') {
         expr = parseExpression();
         skipWhitespace();
@@ -1907,7 +1950,20 @@ class Parser {
         value += in_.get();
       }
       in_.get();
-      return new ASTString(value, in_.tellg());
+      return new ASTString(parseString(value), in_.tellg());
+    } else if (in_.peek() == '\'') {
+      // char
+      in_.get();
+      std::string value;
+      while (in_.peek() != '\'') {
+        value += in_.get();
+      }
+      in_.get();
+      std::string str = parseString(value);
+      if (str.size() != 1) {
+        throw std::runtime_error("Character literal must be a single character");
+      }
+      return new ASTChar(str[0], in_.tellg());
     } else {
       throw std::runtime_error("Unexpected token: ");
     }
