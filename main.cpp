@@ -1,5 +1,6 @@
 #include <cctype>
 #include <cmath>
+#include <exception>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -615,6 +616,9 @@ class ASTNumber : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "i64";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return TheBuilder->getInt64(value_);
+  }
 
  private:
   long int value_;
@@ -800,6 +804,10 @@ class ASTCast : public ASTNode {
     return type_->returnType(runner, stack);
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    TheBuilder->Create
+  }
+
  private:
   ASTNode *value_;
   ASTType *type_;
@@ -837,6 +845,11 @@ class ASTVariableDecl : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "void";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto varspace = TheBuilder->CreateAlloca(type_->into_llvm_type());
+    frame->set(name_, varspace);
+    return llvm::PoisonValue::get(TheBuilder->getVoidTy());
+  }
 
  private:
   std::string name_;
@@ -864,6 +877,16 @@ class ASTVariable : public ASTNode {
     return stack->getVariable(name_)->type_->returnType(runner, stack);
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    try {
+      auto space = frame->resolve(name_);
+      return TheBuilder->CreateLoad(space->getType()->getPointerElementType(), space);
+    } catch (std::string _e) {
+      //no variable found, get global scope data
+      return Module->getFunction(name_);
+    }
+  }
+
  private:
   std::string name_;
 };
@@ -887,6 +910,12 @@ class ASTVariableAssign : public ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "void";
+  }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto varspace = frame->resolve(name_);
+    auto val = value_->codegen(frame);
+    TheBuilder->CreateStore(value_->codegen(frame), val);
+    return val;
   }
 
  private:
@@ -960,6 +989,16 @@ class ASTFunctionCall : public ASTNode {
     return getLambda(runner, stack)->type_->returnType(runner, stack);
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    //TODO: This feels like it is guaranteed to segfault. Do it anyways.
+    auto fp = static_cast<llvm::Function *>(pointer_->codegen(frame));
+    std::vector<llvm::Value *> args_generated;
+    for (auto arg : args_->nodes_) {
+      args_generated.push_back(arg->codegen(frame));
+    }
+    return TheBuilder->CreateCall(fp, args_generated);
+  }
+
  private:
   ASTNode *pointer_;
   ASTNodeList *args_;
@@ -1000,6 +1039,51 @@ class ASTIf : public ASTNode {
     return "void";
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto before_the_if = llvm::BasicBlock::Create(*TheContext);
+    auto common_var_setup_point = TheBuilder->CreateBr(before_the_if);
+    TheBuilder->SetInsertPoint(before_the_if);
+    auto if_cond = condition_->codegen(frame);
+    
+    auto body = llvm::BasicBlock::Create(*TheContext);
+    auto body_else = llvm::BasicBlock::Create(*TheContext);
+    llvm::Value *body_ret;
+    llvm::Value *else_ret;
+    auto post = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateCondBr(if_cond, body, body_else);
+    TheBuilder->SetInsertPoint(body);
+    {
+      CompilerStackFrame frame_body(frame);
+      body_ret = body_->codegen(&frame_body);
+    }
+    TheBuilder->SetInsertPoint(body_else);
+    {
+      CompilerStackFrame frame_else(frame);
+      else_ret = body_->codegen(&frame_else);
+    }
+    auto ty_t = body_ret->getType();
+    auto ty_f = else_ret->getType();
+    llvm::Value *return_val;
+    if ((ty_t->getTypeID() != ty_f->getTypeID()) || ty_t->isVoidTy()) {
+      return_val = llvm::PoisonValue::get(TheBuilder->getVoidTy());
+    } else {
+      TheBuilder->SetInsertPoint(common_var_setup_point);
+      auto rvar = TheBuilder->CreateAlloca(ty_t);
+      TheBuilder->SetInsertPoint(body);
+      TheBuilder->CreateStore(body_ret, rvar);
+      TheBuilder->SetInsertPoint(body_else);
+      TheBuilder->CreateStore(else_ret, rvar);
+      TheBuilder->SetInsertPoint(post);
+      return_val = TheBuilder->CreateLoad(ty_t,rvar);
+    }
+    TheBuilder->SetInsertPoint(body);
+    TheBuilder->CreateBr(post);
+    TheBuilder->SetInsertPoint(body_else);
+    TheBuilder->CreateBr(post);
+    TheBuilder->SetInsertPoint(post);
+    return return_val;
+  }
+
  private:
   ASTNode *condition_;
   ASTNode *body_;
@@ -1031,6 +1115,26 @@ class ASTWhile : public ASTNode {
     }
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto while_cond = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateBr(while_cond);
+    TheBuilder->SetInsertPoint(while_cond);
+    auto the_condition = condition_->codegen(frame);
+    auto while_body = llvm::BasicBlock::Create(*TheContext);
+    auto post_while = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateCondBr(the_condition, while_body, post_while);
+
+    TheBuilder->SetInsertPoint(while_body);
+    {
+      CompilerStackFrame while_frame(frame);
+      body_->codegen(&while_frame);
+    }
+    TheBuilder->CreateBr(while_cond);
+
+    TheBuilder->SetInsertPoint(post_while);
+    return llvm::PoisonValue::get(TheBuilder->getVoidTy());
+  }
+
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "void";
@@ -1060,6 +1164,10 @@ class ASTReturn : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "void";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    TheBuilder->CreateRet(value_->codegen(frame));
+    return llvm::PoisonValue::get(TheBuilder->getVoidTy());
+  }
 
  private:
   ASTNode *value_;
@@ -1082,6 +1190,9 @@ class ASTRef : public ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "pointer:" + stack->getVariable(variable_)->type_->returnType(runner, stack);
+  }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return frame->resolve(variable_);
   }
 
  private:
@@ -1119,6 +1230,11 @@ class ASTDeref : public ASTNode {
     }
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto ptr = value_->codegen(frame);
+    return TheBuilder->CreateLoad(ptr->getType()->getPointerElementType(), ptr);
+  }
+
  private:
   ASTNode *value_;
 };
@@ -1142,6 +1258,9 @@ class ASTNull : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "pointer:void";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return llvm::ConstantPointerNull::get(TheBuilder->getVoidTy()->getPointerTo());
+  }
 
  private:
 };
@@ -1164,6 +1283,9 @@ class ASTBool : public ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "bool";
+  }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return TheBuilder->getInt1(value_);
   }
 
  private:
