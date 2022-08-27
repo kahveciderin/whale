@@ -1,5 +1,5 @@
 fun main = %{
-    [4]char text = ['\ndsad', 'b', 'c', 'd'];
+    [4]char text = ['a', 'b', 'c', 'd'];
     
     for val:text {
         printint(val -> i64);

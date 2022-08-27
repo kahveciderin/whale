@@ -142,7 +142,7 @@ class ASTTemplate : public ASTType {
 
 class ASTFunctionArg : public WithPos {
  public:
-  ASTFunctionArg(ASTType *type, const std::string &name, unsigned long pos);
+  ASTFunctionArg(ASTType *type, const std::string &name, unsigned long pos = 0);
   
   virtual void print(std::ostream &out, int level) const;
 
