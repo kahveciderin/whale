@@ -1,5 +1,7 @@
 fun main = %{
-    i64 v = 12;
-    *i64 a = ref v;
-    printint(deref a);
+    [4]char text = ['\ndsad', 'b', 'c', 'd'];
+    
+    for val:text {
+        printint(val -> i64);
+    };
 };
