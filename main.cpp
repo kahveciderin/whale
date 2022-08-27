@@ -165,7 +165,8 @@ class ASTNode {
 };
 class ASTType {
   public:
-    virtual ~ASTType();
+    //TODO: Commenting this out causes many warnings but makes the code compile.
+    //virtual ~ASTType();
     virtual llvm::Type *into_llvm_type() = 0;
 
     //weird interpreter / parser stuff stuff
