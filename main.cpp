@@ -5,6 +5,11 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Analysis/CGSCCPassManager.h>
+#include <llvm/Analysis/LoopAnalysisManager.h>
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/ADT/APFloat.h>
 #include <llvm/IR/Attributes.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
@@ -19,6 +24,17 @@
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Value.h>
+#include <llvm/Support/Casting.h>
+#include <llvm/Support/Host.h>
+#include <llvm/Support/CodeGen.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/Target/TargetLoweringObjectFile.h>
+#include <llvm/Target/TargetOptions.h>
+#include <llvm/Target/TargetMachine.h>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -641,6 +657,10 @@ class ASTDouble : public ASTNode {
     *(double *)out = value_;
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return llvm::ConstantFP::get(TheBuilder->getDoubleTy(), value_);
+  }
+
  private:
   double value_;
 };
@@ -660,6 +680,10 @@ class ASTString : public ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "pointer:char";
+  }
+
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return TheBuilder->CreateGlobalStringPtr(value_);
   }
 
  private:
@@ -735,6 +759,116 @@ class ASTBinaryOp : public ASTNode {
     }
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto leftval = left_->codegen(frame);
+    auto rightval = right_->codegen(frame);
+    using BinaryOps = llvm::Instruction::BinaryOps;
+    BinaryOps op;
+    bool floatop = leftval->getType()->isFloatingPointTy() || rightval->getType()->isFloatingPointTy();
+    if (floatop) {
+      if (!leftval->getType()->isFloatingPointTy()) {
+        leftval = TheBuilder->CreateCast(llvm::Instruction::CastOps::SIToFP, leftval, rightval->getType());
+      } else if (!rightval->getType()->isFloatingPointTy()) {
+        rightval = TheBuilder->CreateCast(llvm::Instruction::CastOps::SIToFP, rightval, leftval->getType());
+      }
+    } else {
+      if (leftval->getType()->canLosslesslyBitCastTo(rightval->getType())) {
+        leftval = TheBuilder->CreateSExtOrBitCast(leftval, rightval->getType());
+      } else {
+        rightval = TheBuilder->CreateSExtOrBitCast(rightval, leftval->getType());
+      }
+    }
+    
+    if (op_ == "+") {
+      if (floatop) {
+        op = BinaryOps::FAdd;
+      } else {
+        op = BinaryOps::Add;
+      }
+    } else if (op_ == "-") {
+      if (floatop) {
+        op = BinaryOps::FSub;
+      } else {
+        op = BinaryOps::Sub;
+      }
+    } else if (op_ == "*") {
+      if (floatop) {
+        op = BinaryOps::FMul;
+      } else {
+        op = BinaryOps::Mul;
+      }
+    } else if (op_ == "/") {
+      op = BinaryOps::FDiv;
+    } else if (op_ == "//") {
+      op = BinaryOps::SDiv;
+    } else if (op_ == "%") {
+      if (floatop) {
+        op = BinaryOps::FRem;
+      } else {
+        op = BinaryOps::SRem;
+      }
+    } else if (op_ == "<<") {
+      op = BinaryOps::Shl;
+    } else if (op_ == ">>") {
+      op = BinaryOps::LShr;
+    } else if (op_ == "&") {
+      op = BinaryOps::And;
+    } else if (op_ == "|") {
+      op = BinaryOps::Or;
+    } else if (op_ == "^") {
+      op = BinaryOps::Xor;
+    } else if (op_ == "&&") {
+      leftval = TheBuilder->CreateIsNotNull(leftval);
+      rightval = TheBuilder->CreateIsNotNull(rightval);
+      op = BinaryOps::And;
+    } else if (op_ == "||") {
+      leftval = TheBuilder->CreateIsNotNull(leftval);
+      rightval = TheBuilder->CreateIsNotNull(rightval);
+      op = BinaryOps::Or;
+    } else if (op_ == "==") {
+      if (floatop) {
+        return TheBuilder->CreateFCmpOEQ(leftval, rightval);
+      } else {
+        return TheBuilder->CreateICmpEQ(leftval, rightval);
+      }
+      
+    } else if (op_ == "!=") {
+      if (floatop) {
+        return TheBuilder->CreateNot(TheBuilder->CreateFCmpOEQ(leftval, rightval));
+      } else {
+        return TheBuilder->CreateNot(TheBuilder->CreateICmpEQ(leftval, rightval));
+      }
+    } else if (op_ == "<") {
+      if (floatop) {
+        return TheBuilder->CreateFCmpOLT(leftval, rightval);
+      } else {
+        return TheBuilder->CreateICmpSLT(leftval, rightval);
+      }
+    } else if (op_ == ">") {
+      if (floatop) {
+        return TheBuilder->CreateFCmpOGT(leftval, rightval);
+      } else {
+        return TheBuilder->CreateICmpSGT(leftval, rightval);
+      }
+    } else if (op_ == "<=") {
+      if (floatop) {
+        return TheBuilder->CreateFCmpOLE(leftval, rightval);
+      } else {
+        return TheBuilder->CreateICmpSLE(leftval, rightval);
+      }
+    } else if (op_ == ">=") {
+      if (floatop) {
+        return TheBuilder->CreateFCmpOGE(leftval, rightval);
+      } else {
+        return TheBuilder->CreateICmpSGE(leftval, rightval);
+      }
+    } else {
+      throw std::runtime_error("Unknown operator: " + op_);
+    }
+
+    return TheBuilder->CreateBinOp(op, leftval, rightval);
+  }
+
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return op_ == "/" ? "double" : "i64";
@@ -805,7 +939,31 @@ class ASTCast : public ASTNode {
   }
 
   virtual llvm::Value *codegen(CompilerStackFrame *frame) {
-    TheBuilder->Create
+    llvm::Instruction::CastOps op = llvm::Instruction::CastOps::BitCast;
+    auto orig_val = value_->codegen(frame);
+    auto type_from = orig_val->getType();
+    auto type_to = type_->into_llvm_type();
+    if (type_to->isPointerTy() && type_from->isPointerTy()) {
+      //bitcast will suffice
+    } else if (type_from->isFloatTy()) {
+      if (type_to->isFloatTy()) {
+        if (type_from->canLosslesslyBitCastTo(type_to)) {
+          op = llvm::Instruction::CastOps::FPExt;
+        } else {
+          op = llvm::Instruction::CastOps::FPTrunc;
+        }
+      } else {
+        op = llvm::Instruction::CastOps::FPToSI;
+      }
+    } else if (type_to->isFloatTy()) {
+      op = llvm::Instruction::CastOps::SIToFP;
+    } else if (type_from->canLosslesslyBitCastTo(type_to)) {
+      op = llvm::Instruction::CastOps::SExt;
+    } else {
+      op = llvm::Instruction::CastOps::Trunc;
+    }
+
+    return TheBuilder->CreateCast(op, orig_val, type_to);
   }
 
  private:
@@ -914,7 +1072,7 @@ class ASTVariableAssign : public ASTNode {
   virtual llvm::Value *codegen(CompilerStackFrame *frame) {
     auto varspace = frame->resolve(name_);
     auto val = value_->codegen(frame);
-    TheBuilder->CreateStore(value_->codegen(frame), val);
+    TheBuilder->CreateStore(val, varspace);
     return val;
   }
 
@@ -1459,7 +1617,8 @@ class Parser {
       } expressionType = EXPRESSION;
 
       try {
-        parseType();
+        auto _unused = parseType();
+        delete _unused;
         skipWhitespace();
         std::string identifier = parseIdentifier();
         skipWhitespace();
@@ -1779,25 +1938,23 @@ int main() {
   int exitCode = 0;
 
   std::string Error;
-  auto target =
-      llvm::TargetRegistry::lookupTarget(arch_name, target_triple, Error);
-  if (!target) {
-    llvm::errs() << Error;
-    return -1;
-  }
-  TheModule->setTargetTriple(triple_name_str);
-  // Boilerplate ELF emitter code from
-  // https://www.llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl08.html
+  //TODO: Parse from command line args
+  auto triple_name_str = llvm::sys::getDefaultTargetTriple();
   auto CPU = "generic";
-  auto Features = "";
+ 
+    auto TargetTriple = llvm::sys::getDefaultTargetTriple();
+  Module->setTargetTriple(TargetTriple);
+  auto Target = llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
   llvm::TargetOptions opt;
-  auto RM = llvm::Optional<llvm::Reloc::Model>(llvm::Reloc::Model::PIC_);
-  auto TheTargetMachine =
-      target->createTargetMachine(triple_name_str, CPU, Features, opt, RM);
-  TheModule->setDataLayout(TheTargetMachine->createDataLayout());
-  //mmap for lambda stuff, we need executable memory
+  auto RM = llvm::Optional<llvm::Reloc::Model>();
+  auto Features = "";
 
-  llvm::Function::Create(llvm::FunctionType::get(TheBuilder->getVoidTy()->getPointerTo(), std::vector<llvm::Type *>({TheBuilder->getVoidTy()->getPointerTo(), TheBuilder->getIntPtrTy(TheTargetMachine->createDataLayout(), TheBuilder->getInt32Ty(), TheBuilder->getInt32Ty(),TheBuilder->getInt32Ty(), TheBuilder->getInt64Ty())})), llvm::GlobalObject::ExternalLinkage, "mmap", *TheModule);
+  auto TheTargetMachine =
+      Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM);
+  
+  auto DL = llvm::DataLayout(&*Module);
+  
+  llvm::Function::Create(llvm::FunctionType::get(TheBuilder->getVoidTy()->getPointerTo(), std::vector<llvm::Type *>({TheBuilder->getVoidTy()->getPointerTo(), TheBuilder->getIntPtrTy(DL), TheBuilder->getInt32Ty(), TheBuilder->getInt32Ty(),TheBuilder->getInt32Ty(), TheBuilder->getInt64Ty()}), false), llvm::GlobalObject::ExternalLinkage, "mmap", *Module);
 
   
   auto entry = llvm::Function::Create(llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), std::vector<llvm::Type *>(), false), llvm::GlobalValue::ExternalLinkage, "main", *Module);
@@ -1812,16 +1969,16 @@ int main() {
   llvm::InitializeAllAsmPrinters();
 
   
-  llvm::verifyModule(*TheModule, &llvm::errs());
+  llvm::verifyModule(*Module, &llvm::errs());
   // OPTIMIZATION PASSES
   // pre-opt print
-  TheModule->print(llvm::errs(), nullptr);
+  Module->print(llvm::errs(), nullptr);
 
   llvm::PassBuilder pb;
-  llvm::LoopAnalysisManager lam(true);
-  llvm::FunctionAnalysisManager fam(true);
-  llvm::CGSCCAnalysisManager cgsccam(true);
-  llvm::ModuleAnalysisManager mam(true);
+  llvm::LoopAnalysisManager lam;
+  llvm::FunctionAnalysisManager fam;
+  llvm::CGSCCAnalysisManager cgsccam;
+  llvm::ModuleAnalysisManager mam;
 
   pb.registerModuleAnalyses(mam);
   pb.registerCGSCCAnalyses(cgsccam);
@@ -1832,14 +1989,15 @@ int main() {
 
   llvm::ModulePassManager module_pass_manager =
       pb.buildPerModuleDefaultPipeline(
-          optim_level);
+          llvm::OptimizationLevel::O2);
 
-  module_pass_manager.run(*TheModule, mam);
+  module_pass_manager.run(*Module, mam);
   // re-verify post optimization
-  llvm::verifyModule(*TheModule, &llvm::errs());
+  llvm::verifyModule(*Module, &llvm::errs());
   // TODO: get output file name
   std::error_code EC;
-  llvm::raw_fd_ostream dest("out.o", EC, llvm::sys::fs::OF_None);
+  auto output_file = "out.o";
+  llvm::raw_fd_ostream dest(output_file, EC, llvm::sys::fs::OF_None);
 
   if (EC) {
     llvm::errs() << "Could not open file: " << EC.message();
@@ -1849,20 +2007,20 @@ int main() {
   llvm::legacy::PassManager pass;
   auto FileType = llvm::CGFT_ObjectFile;
   // check module
-  TheModule->print(llvm::errs(), nullptr);
+  Module->print(llvm::errs(), nullptr);
 
   if (TheTargetMachine->addPassesToEmitFile(pass, dest, nullptr, FileType)) {
     llvm::errs() << "TheTargetMachine can't emit a file of this type";
     return 1;
   }
 
-  pass.run(*TheModule);
+  pass.run(*Module);
   dest.flush();
   llvm::outs() << "Wrote output to " << output_file << "\n";
 
 
   Runner runner(ast);
-
+  /*
   runner.generateFunction("print",
                           new ASTNodeList({new ASTFunctionArg(
                               new ASTPointer(new ASTBaseType("char")), "str")}),
@@ -1902,4 +2060,6 @@ int main() {
   runner.run(&exitCode);
 
   return exitCode;
+  */
+  return 0;
 }
