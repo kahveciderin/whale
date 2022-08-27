@@ -42,7 +42,7 @@ class RunnerStackFrame;
 ASTNode::ASTNode(unsigned long pos) : WithPos(pos) {}
 ASTNode::~ASTNode() {}
 ASTType::ASTType(unsigned long pos) : WithPos(pos) {}
-
+ASTType::~ASTType() {}
 
 ASTBaseType::ASTBaseType(const std::string &name, unsigned long pos)
     : ASTType(pos), name_(name) {}
@@ -74,7 +74,7 @@ llvm::Type *ASTBaseType::into_llvm_type() {
   }
 }
 
-
+ASTBaseType::~ASTBaseType() {}
 
 ASTNodeList::ASTNodeList(const std::vector<ASTNode *> &nodes, unsigned long pos)
     : ASTNode(pos), nodes_(nodes) {}
@@ -116,6 +116,8 @@ llvm::Value *ASTArrayLiteral::codegen(CompilerStackFrame *frame) {
 
 ASTTemplate::ASTTemplate(ASTType *type, const std::string &name, unsigned long pos)
     : ASTType(pos), type_(type), name_(name) {}
+
+ASTTemplate::~ASTTemplate() {};
 
 llvm::Type *ASTTemplate::into_llvm_type() {
   return nullptr;
@@ -203,6 +205,8 @@ llvm::Value *ASTNativeFunction::codegen(CompilerStackFrame *frame) {
 ASTPointer::ASTPointer(ASTType *type, unsigned long pos)
     : ASTType(pos), type_(type) {}
 
+ASTPointer::~ASTPointer() {}
+
 llvm::Type *ASTPointer::into_llvm_type() {
   return this->type_->into_llvm_type()->getPointerTo();
 }
@@ -210,6 +214,8 @@ llvm::Type *ASTPointer::into_llvm_type() {
 
 ASTArray::ASTArray(ASTType *type, ASTNode *size, unsigned long pos)
     : ASTType(pos), type_(type), size_(size) {}
+
+ASTArray::~ASTArray() {}
 
 llvm::Type *ASTArray::into_llvm_type() {
   return this->type_->into_llvm_type()->getPointerTo();

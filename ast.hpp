@@ -54,8 +54,7 @@ class ASTNode : public WithPos {
 };
 class ASTType : public WithPos {
   public:
-    //TODO: Commenting this out causes many warnings but makes the code compile.
-    //virtual ~ASTType();
+    virtual ~ASTType();
 
     ASTType(unsigned long pos);
 
@@ -73,7 +72,7 @@ class ASTType : public WithPos {
 class ASTBaseType : public ASTType {
  public:
   ASTBaseType(const std::string &name, unsigned long pos = 0);
-
+  virtual ~ASTBaseType();
   virtual void print(std::ostream &out, int level) const;
   virtual llvm::Type *into_llvm_type();
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -125,7 +124,7 @@ class ASTArrayLiteral : public ASTNode {
 class ASTTemplate : public ASTType {
  public:
   ASTTemplate(ASTType *type, const std::string &name, unsigned long pos = 0);
-
+  virtual ~ASTTemplate();
   virtual llvm::Type *into_llvm_type();
 
   virtual void print(std::ostream &out, int level) const;
@@ -144,7 +143,7 @@ class ASTTemplate : public ASTType {
 class ASTFunctionArg : public WithPos {
  public:
   ASTFunctionArg(ASTType *type, const std::string &name, unsigned long pos);
-
+  
   virtual void print(std::ostream &out, int level) const;
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -209,6 +208,8 @@ class ASTPointer : public ASTType {
  public:
   ASTPointer(ASTType *type, unsigned long pos = 0);
 
+  virtual ~ASTPointer();
+
   virtual llvm::Type *into_llvm_type();
 
   virtual void print(std::ostream &out, int level) const;
@@ -224,6 +225,8 @@ class ASTPointer : public ASTType {
 class ASTArray : public ASTType {
  public:
   ASTArray(ASTType *type, ASTNode *size, unsigned long pos = 0);
+
+  virtual ~ASTArray();
 
   virtual llvm::Type *into_llvm_type();
 
