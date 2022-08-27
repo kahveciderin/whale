@@ -1,15 +1,121 @@
 #include <cctype>
 #include <cmath>
+#include <exception>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <llvm/ADT/APInt.h>
+#include <llvm/ADT/Sequence.h>
+#include <llvm/Passes/PassBuilder.h>
+#include <llvm/Analysis/CGSCCPassManager.h>
+#include <llvm/Analysis/LoopAnalysisManager.h>
+#include <llvm/MC/TargetRegistry.h>
+#include <llvm/ADT/APFloat.h>
+#include <llvm/IR/Attributes.h>
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalObject.h>
+#include <llvm/IR/GlobalValue.h>
+#include <llvm/IR/GlobalVariable.h>
+#include <llvm/IR/Instruction.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Intrinsics.h>
+#include <llvm/IR/Type.h>
+#include <llvm/IR/Value.h>
+#include <llvm/Support/Casting.h>
+#include <llvm/Support/Host.h>
+#include <llvm/Support/CodeGen.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/TargetSelect.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/Target/TargetLoweringObjectFile.h>
+#include <llvm/Target/TargetOptions.h>
+#include <llvm/Target/TargetMachine.h>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <sys/types.h>
 #include <vector>
+#include <sys/mman.h>
+
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Module.h>
+
+std::unique_ptr<llvm::LLVMContext> TheContext;
+std::unique_ptr<llvm::IRBuilder<>> TheBuilder;
+std::unique_ptr<llvm::Module> Module;
+
+class WithPos {
+  public:
+  WithPos(unsigned long p) : pos_(p) {}
+  unsigned long pos_;
+};
+
+std::string indent(int level) {
+    std::string s;
+    for (int i = 0; i < level; ++i) {
+      s += "  ";
+    }
+    return s;
+  }
+
+void init_module() {
+  TheContext = std::make_unique<llvm::LLVMContext>();
+  Module = std::make_unique<llvm::Module>("whale", *TheContext);
+  TheBuilder = std::make_unique<llvm::IRBuilder<>>(*TheContext);
+  }
+
+class CompilerStackFrame {
+  public:
+    CompilerStackFrame(CompilerStackFrame *parent = nullptr) : parent(parent) {}
+    void set(std::string name, llvm::Value *varspace) {
+      data[name] = varspace;
+    }
+    virtual llvm::Value *resolve(std::string name) {
+      if (data.count(name)) {
+        return data[name];
+      }
+      if (parent) {
+        //tail call optimization
+        return parent->resolve(name);
+      }
+      throw "Undefined variable " + name;
+    }
+  protected:
+  CompilerStackFrame *parent;
+  std::map<std::string, llvm::Value *> data;
+};
+
+class LambdaStackFrame : public CompilerStackFrame {
+  public:
+    LambdaStackFrame(CompilerStackFrame *upper, std::function<llvm::Value *(std::string, llvm::Value *)> register_implicit) : parent(upper), implicit_handler(register_implicit) {};
+    virtual llvm::Value *resolve(std::string name) {
+      if (this->data.count(name)) {
+        return data[name];
+      }
+      if (parent) {
+        auto res = parent->resolve(name);
+        auto registered = implicit_handler(name, res);
+        this->set(name, registered);
+        return registered;
+      }
+      throw "Undefined variable " + name;
+    }
+  private:
+  std::function<llvm::Value *(std::string name, llvm::Value *actual)> implicit_handler;
+  protected:
+  CompilerStackFrame *parent;
+};
 
 enum class ValueType {
   i32,
@@ -95,28 +201,35 @@ class ASTNodeList;
 class Runner;
 class RunnerStackFrame;
 
-class ASTNode {
+class ASTNode : public WithPos {
  public:
-  ASTNode(unsigned long pos) : pos_(pos) {}
+  ASTNode(unsigned long pos) : WithPos(pos) {}
   virtual ~ASTNode() {}
   virtual void print(std::ostream &out, int level = 0) const = 0;
-  std::string indent(int level) const {
-    std::string s;
-    for (int i = 0; i < level; ++i) {
-      s += "  ";
-    }
-    return s;
-  }
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out = nullptr) const = 0;
 
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const = 0;
-  unsigned long pos_ = 0;
+
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) = 0;
 };
-class ASTType : public ASTNode {
- public:
-  ASTType(unsigned long pos = 0) : ASTNode(pos) {}
+class ASTType : public WithPos {
+  public:
+    //TODO: Commenting this out causes many warnings but makes the code compile.
+    //virtual ~ASTType();
+
+    ASTType(unsigned long pos) : WithPos(pos) {}
+
+    virtual llvm::Type *into_llvm_type() = 0;
+
+    //weird interpreter / parser stuff stuff
+    virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const = 0;
+    virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out = nullptr) const = 0;
+
+    virtual void print(std::ostream &out, int level = 0) const = 0;
 };
 
 class ASTBaseType : public ASTType {
@@ -125,9 +238,33 @@ class ASTBaseType : public ASTType {
       : ASTType(pos), name_(name) {}
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Type: " << name_ << std::endl;
+    out << indent(level) << "Type: " << name_ << std::endl;
   }
-
+  virtual llvm::Type *into_llvm_type() {
+    ValueType type = parseType(name_);
+    switch (type) {
+      case ValueType::i32:
+        return llvm::Type::getInt32Ty(*TheContext);
+      case ValueType::i64:
+        return llvm::Type::getInt64Ty(*TheContext);
+      case ValueType::fun:
+        return llvm::Type::getPrimitiveType(*TheContext, llvm::Type::FunctionTyID);
+      case ValueType::float_:
+        return llvm::Type::getFloatTy(*TheContext);
+      case ValueType::double_:
+        return llvm::Type::getDoubleTy(*TheContext);
+      case ValueType::void_:
+        return llvm::Type::getVoidTy(*TheContext);
+      case ValueType::bool_:
+        return llvm::Type::getInt1Ty(*TheContext);
+      case ValueType::char_:
+        return llvm::Type::getInt8Ty(*TheContext);
+      case ValueType::pointer:
+        return llvm::Type::getPrimitiveType(*TheContext, llvm::Type::PointerTyID);
+      default:
+        throw std::runtime_error("Unknown type: " + name_);
+    }
+  }
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
     *(int *)out = sizeOfType(name_);
@@ -141,7 +278,7 @@ class ASTBaseType : public ASTType {
  private:
   std::string name_;
 };
-
+class ASTFunctionArg;
 class Runner {
  public:
   bool _return = false;
@@ -151,7 +288,7 @@ class Runner {
   void run(void *out);
   void *alloc(int size);
 
-  void generateFunction(std::string name, ASTNodeList *args,
+  void generateFunction(std::string name, std::vector<ASTFunctionArg *> args,
                         void (*body)(Runner *, RunnerStackFrame *),
                         ASTType *ret = new ASTBaseType("void"));
 
@@ -167,6 +304,8 @@ class Runner {
   RunnerStackFrame *stackFrame_;
   std::istream &code_;
 };
+
+
 
 class RunnerStackFrame {
  public:
@@ -220,7 +359,7 @@ class ASTNodeList : public ASTNode {
   void add(ASTNode *node) { nodes_.push_back(node); }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "NodeList:\n";
+    out << indent(level) << "NodeList:\n";
     for (auto node : nodes_) {
       node->print(out, level + 1);
     }
@@ -245,17 +384,24 @@ class ASTNodeList : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "void";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    llvm::Value *retvar = llvm::PoisonValue::get(llvm::Type::getVoidTy(*TheContext));
+    for (auto node : nodes_) {
+      retvar = node->codegen(frame);
+    }
+    return retvar;
+  }
 
   std::vector<ASTNode *> nodes_;
 
  private:
 };
-class ASTArrayLiteral : public ASTType {
+class ASTArrayLiteral : public ASTNode {
  public:
   ASTArrayLiteral(ASTNodeList *list, unsigned long pos = 0)
-      : ASTType(pos), list_(list) {}
+      : ASTNode(pos), list_(list) {}
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "ArrayLiteral: " << std::endl;
+    out << indent(level) << "ArrayLiteral: " << std::endl;
     list_->print(out, level + 1);
   }
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -302,6 +448,20 @@ class ASTArrayLiteral : public ASTType {
     return "array-" + std::to_string(list_->nodes_.size()) + ":" + type;
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    std::vector<llvm::Value *> values;
+    for (auto node : list_->nodes_) {
+      values.push_back(node->codegen(frame));
+    }
+    auto pointer_to_list = TheBuilder->CreateAlloca(llvm::ArrayType::get(values[0]->getType(), values.size()));
+    int idx = 0;
+    for (auto value : values) {
+      TheBuilder->CreateStore(value, TheBuilder->CreateGEP(value->getType()->getPointerTo(), pointer_to_list, std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(idx)})));
+      idx++;
+    }
+    return TheBuilder->CreateLoad(pointer_to_list->getAllocatedType(), pointer_to_list);
+  }
+
  private:
   ASTNodeList *list_;
 };
@@ -311,8 +471,12 @@ class ASTTemplate : public ASTType {
   ASTTemplate(ASTType *type, const std::string &name, unsigned long pos = 0)
       : ASTType(pos), type_(type), name_(name) {}
 
+  virtual llvm::Type *into_llvm_type() {
+    return nullptr;
+  }
+
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Template: " << name_ << std::endl;
+    out << indent(level) << "Template: " << name_ << std::endl;
     type_->print(out, level + 1);
   }
 
@@ -330,17 +494,43 @@ class ASTTemplate : public ASTType {
   ASTType *type_;
   std::string name_;
 };
+
+class ASTFunctionArg : public WithPos {
+ public:
+  ASTFunctionArg(ASTType *type, const std::string &name, unsigned long pos)
+      : type_(type), name_(name), WithPos(pos) {}
+
+  virtual void print(std::ostream &out, int level) const {
+    out << indent(level) << "Argument: " << name_ << std::endl;
+    type_->print(out, level + 1);
+  }
+
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const {
+    void *ptr = stackFrame->allocVariable(name_, (ASTType *)type_, runner);
+    *(void **)out = ptr;
+  }
+
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const {
+    return type_->returnType(runner, stack);
+  }
+  ASTType *type_;
+  std::string name_;
+};
+
 class ASTLambda : public ASTNode {
  public:
-  ASTLambda(ASTNodeList *args, ASTNode *body, ASTType *type,
-            unsigned long pos = 0)
-      : ASTNode(pos), args_(args), body_(body), type_(type) {}
+  ASTLambda(std::vector<ASTFunctionArg *> args, ASTNode *body, ASTType *type, unsigned long pos = 0)
+      : args_(args), body_(body), type_(type), ASTNode(pos) {}
 
   virtual ~ASTLambda() { delete body_; }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Lambda: " << std::endl;
-    args_->print(out, level + 1);
+    out << indent(level) << "Lambda: " << std::endl;
+    for (auto arg : args_) {
+      arg->print(out, level + 1);
+    }
     body_->print(out, level + 1);
     type_->print(out, level + 1);
   }
@@ -355,7 +545,64 @@ class ASTLambda : public ASTNode {
     return "fun";
   }
 
-  ASTNodeList *args_;
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    std::vector<llvm::Type *> implicit_args;
+    std::vector<llvm::Value *> trampoline_object_members;
+    std::vector<llvm::Type *> total_args;
+    auto lambda_trampoline_data = llvm::StructType::create(*TheContext);
+    total_args.push_back(lambda_trampoline_data->getPointerTo());
+    for (auto arg : this->args_) {
+      total_args.push_back(arg->type_->into_llvm_type());
+    }
+    auto lambda_func = llvm::Function::Create(llvm::FunctionType::get(type_->into_llvm_type(), total_args, false), llvm::GlobalValue::InternalLinkage, "", *Module);
+    lambda_func->addParamAttr(0, llvm::Attribute::Nest);
+
+    auto lambda_setup_block = llvm::BasicBlock::Create(*TheContext, "", lambda_func);
+    
+    auto lambda_body = llvm::BasicBlock::Create(*TheContext);
+    
+    auto where_we_left_off = TheBuilder->saveIP();
+
+    
+    LambdaStackFrame cur_frame(frame, [&](std::string name, llvm::Value *outer_definition) -> llvm::Value * {
+      auto old_ip = TheBuilder->saveIP();
+
+      TheBuilder->SetInsertPoint(lambda_setup_block);
+      auto alloc_type = outer_definition->getType();
+      auto proxy_pointer = TheBuilder->CreateGEP(alloc_type, lambda_func->getArg(0), std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(implicit_args.size())}));
+      implicit_args.push_back(alloc_type);
+      trampoline_object_members.push_back(outer_definition);
+
+      TheBuilder->restoreIP(old_ip);
+      return proxy_pointer;
+    });
+    TheBuilder->SetInsertPoint(lambda_setup_block);
+    for (int i=0;i<this->args_.size();i++) {
+      auto normal_arg_memory = TheBuilder->CreateAlloca(total_args[i+1]);
+      TheBuilder->CreateStore(lambda_func->getArg(i+1), normal_arg_memory);
+      cur_frame.set(this->args_[i]->name_, normal_arg_memory);
+    }
+    TheBuilder->CreateBr(lambda_body);
+    TheBuilder->SetInsertPoint(lambda_body);
+    body_->codegen(&cur_frame);
+  
+    TheBuilder->restoreIP(where_we_left_off);
+    lambda_trampoline_data->setBody(implicit_args);
+    auto the_trampoline_object = TheBuilder->CreateAlloca(lambda_trampoline_data);
+    //load our trampoline
+    for (int i = 0; i < trampoline_object_members.size(); i++) {
+      TheBuilder->CreateStore(trampoline_object_members[i], TheBuilder->CreateGEP(implicit_args[i], the_trampoline_object, std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(i)})));
+    }
+    //create trampoline intrinsic
+    //TODO unmapping this memory sometime is something to be considered.
+    auto tramp_memory = TheBuilder->CreateCall(Module->getFunction("mmap"), std::vector<llvm::Value *>({TheBuilder->CreateCast(llvm::Instruction::BitCast, TheBuilder->getInt64(0), TheBuilder->getInt8PtrTy()), TheBuilder->getInt64(72), TheBuilder->getInt32(PROT_READ | PROT_WRITE | PROT_EXEC), TheBuilder->getInt32(MAP_ANONYMOUS | MAP_PRIVATE), TheBuilder->getInt32(0), TheBuilder->getInt64(0)}));
+    TheBuilder->CreateIntrinsic(llvm::Intrinsic::init_trampoline, std::vector<llvm::Type *>({TheBuilder->getInt8PtrTy(), TheBuilder->getInt8PtrTy(), TheBuilder->getInt8PtrTy()}), std::vector<llvm::Value *>({tramp_memory, lambda_func, the_trampoline_object}));
+    auto the_final_func_ptr = TheBuilder->CreateUnaryIntrinsic(llvm::Intrinsic::adjust_trampoline, tramp_memory);
+    total_args.erase(total_args.begin());
+    return TheBuilder->CreateCast(llvm::Instruction::BitCast, the_final_func_ptr, llvm::FunctionType::get(type_->into_llvm_type(), total_args, false));
+  }
+
+  std::vector<ASTFunctionArg *> args_;
   ASTNode *body_;
   ASTType *type_;
 
@@ -371,7 +618,7 @@ class ASTNativeFunction : public ASTNode {
   virtual ~ASTNativeFunction() {}
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "native @ " << function_;
+    out << indent(level) << "native @ " << function_;
   }
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -382,6 +629,10 @@ class ASTNativeFunction : public ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "void";
+  }
+
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    throw "No compiler-native functions in LLVM compilation allowed!";
   }
 
  private:
@@ -434,7 +685,7 @@ Runner::Runner(ASTNode *ast, std::istream &code) : ast_(ast), code_(code) {
 void Runner::run(void *out) { ast_->run(this, this->stackFrame_, out); }
 void *Runner::alloc(int size) { return malloc(size); }
 
-void Runner::generateFunction(std::string name, ASTNodeList *args,
+void Runner::generateFunction(std::string name, std::vector<ASTFunctionArg *> args,
                               void (*body)(Runner *, RunnerStackFrame *),
                               ASTType *ret) {
   ASTLambda *newLambda =
@@ -453,8 +704,12 @@ class ASTPointer : public ASTType {
   ASTPointer(ASTType *type, unsigned long pos = 0)
       : ASTType(pos), type_(type) {}
 
+  virtual llvm::Type *into_llvm_type() {
+    return this->type_->into_llvm_type()->getPointerTo();
+  }
+
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Pointer: " << std::endl;
+    out << indent(level) << "Pointer: " << std::endl;
     type_->print(out, level + 1);
   }
 
@@ -476,8 +731,12 @@ class ASTArray : public ASTType {
   ASTArray(ASTType *type, ASTNode *size, unsigned long pos = 0)
       : ASTType(pos), type_(type), size_(size) {}
 
+  virtual llvm::Type *into_llvm_type() {
+    return this->type_->into_llvm_type()->getPointerTo();
+  }
+
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Array: " << std::endl;
+    out << indent(level) << "Array: " << std::endl;
     type_->print(out, level + 1);
     size_->print(out, level + 1);
   }
@@ -503,31 +762,6 @@ class ASTArray : public ASTType {
  private:
   ASTNode *size_;
 };
-class ASTFunctionArg : public ASTNode {
- public:
-  ASTFunctionArg(ASTType *type, const std::string &name, unsigned long pos = 0)
-      : ASTNode(pos), name_(name), type_(type) {}
-
-  virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Argument: " << name_ << std::endl;
-    type_->print(out, level + 1);
-  }
-
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
-                   void *out) const {
-    void *ptr = stackFrame->allocVariable(name_, (ASTType *)type_, runner);
-    *(void **)out = ptr;
-  }
-
-  virtual const std::string returnType(Runner *runner,
-                                       RunnerStackFrame *stack) const {
-    return type_->returnType(runner, stack);
-  }
-  std::string name_;
-
- private:
-  ASTType *type_;
-};
 
 class ASTNumber : public ASTNode {
  public:
@@ -535,7 +769,7 @@ class ASTNumber : public ASTNode {
       : ASTNode(pos), value_(value) {}
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Number: " << value_ << std::endl;
+    out << indent(level) << "Number: " << value_ << std::endl;
   }
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -547,6 +781,9 @@ class ASTNumber : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "i64";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return TheBuilder->getInt64(value_);
+  }
 
  private:
   long int value_;
@@ -556,7 +793,7 @@ class ASTChar : public ASTNode {
   ASTChar(char value, unsigned long pos = 0)
       : ASTNode(pos), value_(value) {}
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Char: " << value_ << std::endl;
+    out << indent(level) << "Char: " << value_ << std::endl;
   }
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
@@ -565,6 +802,9 @@ class ASTChar : public ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "char";
+  }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return TheBuilder->getInt8(value_);
   }
  private:
   char value_;
@@ -575,7 +815,7 @@ class ASTDouble : public ASTNode {
       : ASTNode(pos), value_(value) {}
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Double: " << value_ << std::endl;
+    out << indent(level) << "Double: " << value_ << std::endl;
   }
 
   virtual const std::string returnType(Runner *runner,
@@ -588,6 +828,10 @@ class ASTDouble : public ASTNode {
     *(double *)out = value_;
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return llvm::ConstantFP::get(TheBuilder->getDoubleTy(), value_);
+  }
+
  private:
   double value_;
 };
@@ -597,7 +841,7 @@ class ASTString : public ASTNode {
       : ASTNode(pos), value_(value) {}
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "String: \"" << value_ << "\"" << std::endl;
+    out << indent(level) << "String: \"" << value_ << "\"" << std::endl;
   }
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -608,6 +852,10 @@ class ASTString : public ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "pointer:char";
+  }
+
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return TheBuilder->CreateGlobalStringPtr(value_);
   }
 
  private:
@@ -626,7 +874,7 @@ class ASTBinaryOp : public ASTNode {
   }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "BinaryOp: " << op_ << std::endl;
+    out << indent(level) << "BinaryOp: " << op_ << std::endl;
     left_->print(out, level + 1);
     right_->print(out, level + 1);
   }
@@ -684,6 +932,116 @@ class ASTBinaryOp : public ASTNode {
     }
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto leftval = left_->codegen(frame);
+    auto rightval = right_->codegen(frame);
+    using BinaryOps = llvm::Instruction::BinaryOps;
+    BinaryOps op;
+    bool floatop = leftval->getType()->isFloatingPointTy() || rightval->getType()->isFloatingPointTy();
+    if (floatop) {
+      if (!leftval->getType()->isFloatingPointTy()) {
+        leftval = TheBuilder->CreateCast(llvm::Instruction::CastOps::SIToFP, leftval, rightval->getType());
+      } else if (!rightval->getType()->isFloatingPointTy()) {
+        rightval = TheBuilder->CreateCast(llvm::Instruction::CastOps::SIToFP, rightval, leftval->getType());
+      }
+    } else {
+      if (leftval->getType()->canLosslesslyBitCastTo(rightval->getType())) {
+        leftval = TheBuilder->CreateSExtOrBitCast(leftval, rightval->getType());
+      } else {
+        rightval = TheBuilder->CreateSExtOrBitCast(rightval, leftval->getType());
+      }
+    }
+    
+    if (op_ == "+") {
+      if (floatop) {
+        op = BinaryOps::FAdd;
+      } else {
+        op = BinaryOps::Add;
+      }
+    } else if (op_ == "-") {
+      if (floatop) {
+        op = BinaryOps::FSub;
+      } else {
+        op = BinaryOps::Sub;
+      }
+    } else if (op_ == "*") {
+      if (floatop) {
+        op = BinaryOps::FMul;
+      } else {
+        op = BinaryOps::Mul;
+      }
+    } else if (op_ == "/") {
+      op = BinaryOps::FDiv;
+    } else if (op_ == "//") {
+      op = BinaryOps::SDiv;
+    } else if (op_ == "%") {
+      if (floatop) {
+        op = BinaryOps::FRem;
+      } else {
+        op = BinaryOps::SRem;
+      }
+    } else if (op_ == "<<") {
+      op = BinaryOps::Shl;
+    } else if (op_ == ">>") {
+      op = BinaryOps::LShr;
+    } else if (op_ == "&") {
+      op = BinaryOps::And;
+    } else if (op_ == "|") {
+      op = BinaryOps::Or;
+    } else if (op_ == "^") {
+      op = BinaryOps::Xor;
+    } else if (op_ == "&&") {
+      leftval = TheBuilder->CreateIsNotNull(leftval);
+      rightval = TheBuilder->CreateIsNotNull(rightval);
+      op = BinaryOps::And;
+    } else if (op_ == "||") {
+      leftval = TheBuilder->CreateIsNotNull(leftval);
+      rightval = TheBuilder->CreateIsNotNull(rightval);
+      op = BinaryOps::Or;
+    } else if (op_ == "==") {
+      if (floatop) {
+        return TheBuilder->CreateFCmpOEQ(leftval, rightval);
+      } else {
+        return TheBuilder->CreateICmpEQ(leftval, rightval);
+      }
+      
+    } else if (op_ == "!=") {
+      if (floatop) {
+        return TheBuilder->CreateNot(TheBuilder->CreateFCmpOEQ(leftval, rightval));
+      } else {
+        return TheBuilder->CreateNot(TheBuilder->CreateICmpEQ(leftval, rightval));
+      }
+    } else if (op_ == "<") {
+      if (floatop) {
+        return TheBuilder->CreateFCmpOLT(leftval, rightval);
+      } else {
+        return TheBuilder->CreateICmpSLT(leftval, rightval);
+      }
+    } else if (op_ == ">") {
+      if (floatop) {
+        return TheBuilder->CreateFCmpOGT(leftval, rightval);
+      } else {
+        return TheBuilder->CreateICmpSGT(leftval, rightval);
+      }
+    } else if (op_ == "<=") {
+      if (floatop) {
+        return TheBuilder->CreateFCmpOLE(leftval, rightval);
+      } else {
+        return TheBuilder->CreateICmpSLE(leftval, rightval);
+      }
+    } else if (op_ == ">=") {
+      if (floatop) {
+        return TheBuilder->CreateFCmpOGE(leftval, rightval);
+      } else {
+        return TheBuilder->CreateICmpSGE(leftval, rightval);
+      }
+    } else {
+      throw std::runtime_error("Unknown operator: " + op_);
+    }
+
+    return TheBuilder->CreateBinOp(op, leftval, rightval);
+  }
+
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return op_ == "/" ? "double" : "i64";
@@ -706,7 +1064,7 @@ class ASTCast : public ASTNode {
   }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Cast: " << std::endl;
+    out << indent(level) << "Cast: " << std::endl;
     type_->print(out, level + 1);
     value_->print(out, level + 1);
   }
@@ -764,6 +1122,34 @@ class ASTCast : public ASTNode {
     return type_->returnType(runner, stack);
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    llvm::Instruction::CastOps op = llvm::Instruction::CastOps::BitCast;
+    auto orig_val = value_->codegen(frame);
+    auto type_from = orig_val->getType();
+    auto type_to = type_->into_llvm_type();
+    if (type_to->isPointerTy() && type_from->isPointerTy()) {
+      //bitcast will suffice
+    } else if (type_from->isFloatTy()) {
+      if (type_to->isFloatTy()) {
+        if (type_from->canLosslesslyBitCastTo(type_to)) {
+          op = llvm::Instruction::CastOps::FPExt;
+        } else {
+          op = llvm::Instruction::CastOps::FPTrunc;
+        }
+      } else {
+        op = llvm::Instruction::CastOps::FPToSI;
+      }
+    } else if (type_to->isFloatTy()) {
+      op = llvm::Instruction::CastOps::SIToFP;
+    } else if (type_from->canLosslesslyBitCastTo(type_to)) {
+      op = llvm::Instruction::CastOps::SExt;
+    } else {
+      op = llvm::Instruction::CastOps::Trunc;
+    }
+
+    return TheBuilder->CreateCast(op, orig_val, type_to);
+  }
+
  private:
   ASTNode *value_;
   ASTType *type_;
@@ -781,7 +1167,7 @@ class ASTVariableDecl : public ASTNode {
   }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "VariableDecl: " << name_ << std::endl;
+    out << indent(level) << "VariableDecl: " << name_ << std::endl;
     type_->print(out, level + 1);
     if (value_ != nullptr) {
       value_->print(out, level + 1);
@@ -808,6 +1194,11 @@ class ASTVariableDecl : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "void";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto varspace = TheBuilder->CreateAlloca(type_->into_llvm_type());
+    frame->set(name_, varspace);
+    return llvm::PoisonValue::get(TheBuilder->getVoidTy());
+  }
 
  private:
   std::string name_;
@@ -820,7 +1211,7 @@ class ASTVariable : public ASTNode {
       : ASTNode(pos), name_(name) {}
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Variable: " << name_ << std::endl;
+    out << indent(level) << "Variable: " << name_ << std::endl;
   }
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -836,6 +1227,16 @@ class ASTVariable : public ASTNode {
     return stack->getVariable(name_)->type_->returnType(runner, stack);
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    try {
+      auto space = frame->resolve(name_);
+      return TheBuilder->CreateLoad(space->getType()->getPointerElementType(), space);
+    } catch (std::string _e) {
+      //no variable found, get global scope data
+      return Module->getFunction(name_);
+    }
+  }
+
  private:
   std::string name_;
 };
@@ -848,7 +1249,7 @@ class ASTVariableAssign : public ASTNode {
   virtual ~ASTVariableAssign() { delete value_; }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "VariableAssign: " << name_ << std::endl;
+    out << indent(level) << "VariableAssign: " << name_ << std::endl;
     value_->print(out, level + 1);
   }
 
@@ -860,6 +1261,12 @@ class ASTVariableAssign : public ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "void";
+  }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto varspace = frame->resolve(name_);
+    auto val = value_->codegen(frame);
+    TheBuilder->CreateStore(val, varspace);
+    return val;
   }
 
  private:
@@ -874,7 +1281,7 @@ class ASTFunctionCall : public ASTNode {
   virtual ~ASTFunctionCall() { delete args_; }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "FunctionCall: " << std::endl;
+    out << indent(level) << "FunctionCall: " << std::endl;
     pointer_->print(out, level + 1);
     args_->print(out, level + 1);
   }
@@ -892,14 +1299,13 @@ class ASTFunctionCall : public ASTNode {
     ASTLambda *lambda = getLambda(runner, stackFrame);
     RunnerStackFrame newStackFrame(stackFrame);
     int i = 0;
-    if (lambda->args_->nodes_.size() != args_->nodes_.size()) {
+    if (lambda->args_.size() != args_->nodes_.size()) {
       runner->errorAt(this, "Wrong number of arguments on function call: " +
-                                std::to_string(lambda->args_->nodes_.size()) +
-                                " expected, " +
-                                std::to_string(args_->nodes_.size()) +
-                                " given");
+                               std::to_string(lambda->args_.size()) +
+                               " expected, " +
+                               std::to_string(args_->nodes_.size()) + " given");
     }
-    for (auto arg : lambda->args_->nodes_) {
+    for (auto arg : lambda->args_) {
       if (arg->returnType(runner, &newStackFrame) !=
           args_->nodes_[i]->returnType(runner, &newStackFrame)) {
         runner->errorAt(
@@ -936,6 +1342,16 @@ class ASTFunctionCall : public ASTNode {
     return getLambda(runner, stack)->type_->returnType(runner, stack);
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    //TODO: This feels like it is guaranteed to segfault. Do it anyways.
+    auto fp = static_cast<llvm::Function *>(pointer_->codegen(frame));
+    std::vector<llvm::Value *> args_generated;
+    for (auto arg : args_->nodes_) {
+      args_generated.push_back(arg->codegen(frame));
+    }
+    return TheBuilder->CreateCall(fp, args_generated);
+  }
+
  private:
   ASTNode *pointer_;
   ASTNodeList *args_;
@@ -953,7 +1369,7 @@ class ASTIf : public ASTNode {
   }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "If: " << std::endl;
+    out << indent(level) << "If: " << std::endl;
     condition_->print(out, level + 1);
     body_->print(out, level + 1);
     if (elseBody_ != nullptr) {
@@ -977,6 +1393,51 @@ class ASTIf : public ASTNode {
     return "void";
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto before_the_if = llvm::BasicBlock::Create(*TheContext);
+    auto common_var_setup_point = TheBuilder->CreateBr(before_the_if);
+    TheBuilder->SetInsertPoint(before_the_if);
+    auto if_cond = condition_->codegen(frame);
+    
+    auto body = llvm::BasicBlock::Create(*TheContext);
+    auto body_else = llvm::BasicBlock::Create(*TheContext);
+    llvm::Value *body_ret;
+    llvm::Value *else_ret;
+    auto post = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateCondBr(if_cond, body, body_else);
+    TheBuilder->SetInsertPoint(body);
+    {
+      CompilerStackFrame frame_body(frame);
+      body_ret = body_->codegen(&frame_body);
+    }
+    TheBuilder->SetInsertPoint(body_else);
+    {
+      CompilerStackFrame frame_else(frame);
+      else_ret = body_->codegen(&frame_else);
+    }
+    auto ty_t = body_ret->getType();
+    auto ty_f = else_ret->getType();
+    llvm::Value *return_val;
+    if ((ty_t->getTypeID() != ty_f->getTypeID()) || ty_t->isVoidTy()) {
+      return_val = llvm::PoisonValue::get(TheBuilder->getVoidTy());
+    } else {
+      TheBuilder->SetInsertPoint(common_var_setup_point);
+      auto rvar = TheBuilder->CreateAlloca(ty_t);
+      TheBuilder->SetInsertPoint(body);
+      TheBuilder->CreateStore(body_ret, rvar);
+      TheBuilder->SetInsertPoint(body_else);
+      TheBuilder->CreateStore(else_ret, rvar);
+      TheBuilder->SetInsertPoint(post);
+      return_val = TheBuilder->CreateLoad(ty_t,rvar);
+    }
+    TheBuilder->SetInsertPoint(body);
+    TheBuilder->CreateBr(post);
+    TheBuilder->SetInsertPoint(body_else);
+    TheBuilder->CreateBr(post);
+    TheBuilder->SetInsertPoint(post);
+    return return_val;
+  }
+
  private:
   ASTNode *condition_;
   ASTNode *body_;
@@ -993,7 +1454,7 @@ class ASTWhile : public ASTNode {
   }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "While: " << std::endl;
+    out << indent(level) << "While: " << std::endl;
     condition_->print(out, level + 1);
     body_->print(out, level + 1);
   }
@@ -1006,6 +1467,26 @@ class ASTWhile : public ASTNode {
       body_->run(runner, stackFrame, out);
       condition_->run(runner, stackFrame, &conditionOutput);
     }
+  }
+
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto while_cond = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateBr(while_cond);
+    TheBuilder->SetInsertPoint(while_cond);
+    auto the_condition = condition_->codegen(frame);
+    auto while_body = llvm::BasicBlock::Create(*TheContext);
+    auto post_while = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateCondBr(the_condition, while_body, post_while);
+
+    TheBuilder->SetInsertPoint(while_body);
+    {
+      CompilerStackFrame while_frame(frame);
+      body_->codegen(&while_frame);
+    }
+    TheBuilder->CreateBr(while_cond);
+
+    TheBuilder->SetInsertPoint(post_while);
+    return llvm::PoisonValue::get(TheBuilder->getVoidTy());
   }
 
   virtual const std::string returnType(Runner *runner,
@@ -1025,7 +1506,7 @@ class ASTReturn : public ASTNode {
   virtual ~ASTReturn() { delete value_; }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Return: " << std::endl;
+    out << indent(level) << "Return: " << std::endl;
     if (value_ != nullptr) {
       value_->print(out, level + 1);
     }
@@ -1042,6 +1523,10 @@ class ASTReturn : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "void";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    TheBuilder->CreateRet(value_->codegen(frame));
+    return llvm::PoisonValue::get(TheBuilder->getVoidTy());
+  }
 
  private:
   ASTNode *value_;
@@ -1052,7 +1537,7 @@ class ASTRef : public ASTNode {
       : ASTNode(pos), variable_(variable) {}
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Ref: " << variable_ << std::endl;
+    out << indent(level) << "Ref: " << variable_ << std::endl;
   }
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -1067,6 +1552,9 @@ class ASTRef : public ASTNode {
     return "pointer:" +
            stack->getVariable(variable_)->type_->returnType(runner, stack);
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return frame->resolve(variable_);
+  }
 
  private:
   std::string variable_;
@@ -1079,7 +1567,7 @@ class ASTDeref : public ASTNode {
   virtual ~ASTDeref() { delete value_; }
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Deref: " << std::endl;
+    out << indent(level) << "Deref: " << std::endl;
     value_->print(out, level + 1);
   }
 
@@ -1105,6 +1593,11 @@ class ASTDeref : public ASTNode {
     }
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto ptr = value_->codegen(frame);
+    return TheBuilder->CreateLoad(ptr->getType()->getPointerElementType(), ptr);
+  }
+
  private:
   ASTNode *value_;
 };
@@ -1115,7 +1608,7 @@ class ASTNull : public ASTNode {
   virtual ~ASTNull() {}
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Null" << std::endl;
+    out << indent(level) << "Null" << std::endl;
   }
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -1128,6 +1621,9 @@ class ASTNull : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "pointer:void";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return llvm::ConstantPointerNull::get(TheBuilder->getVoidTy()->getPointerTo());
+  }
 
  private:
 };
@@ -1138,7 +1634,7 @@ class ASTBool : public ASTNode {
   virtual ~ASTBool() {}
 
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Bool: " << value_ << std::endl;
+    out << indent(level) << "Bool: " << value_ << std::endl;
   }
 
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -1150,6 +1646,9 @@ class ASTBool : public ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "bool";
+  }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return TheBuilder->getInt1(value_);
   }
 
  private:
@@ -1164,7 +1663,7 @@ class ASTArrayAccess : public ASTNode {
     delete index_;
   }
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "ArrayAccess: " << std::endl;
+    out << indent(level) << "ArrayAccess: " << std::endl;
     array_->print(out, level + 1);
     index_->print(out, level + 1);
   }
@@ -1197,6 +1696,11 @@ class ASTArrayAccess : public ASTNode {
 
     return array_->returnType(runner, stack)
         .substr(array_->returnType(runner, stack).find(':') + 1);
+  }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto array_val = array_->codegen(frame);
+    auto idx = index_->codegen(frame);
+    return TheBuilder->CreateExtractElement(array_val, idx);
   }
 
  private:
@@ -1231,7 +1735,7 @@ class ASTForIn : public ASTNode {
     delete body_;
   }
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "ForIn: " << variable_ << std::endl;
+    out << indent(level) << "ForIn: " << variable_ << std::endl;
     array_->print(out, level + 1);
     body_->print(out, level + 1);
   }
@@ -1264,6 +1768,27 @@ class ASTForIn : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "void";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto source_array = array_->codegen(frame);
+    auto iterator_var = TheBuilder->CreateAlloca(TheBuilder->getInt64Ty());
+    TheBuilder->CreateStore(TheBuilder->getInt64(0), iterator_var);
+
+    auto array_comp_loop = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateBr(array_comp_loop);
+    CompilerStackFrame generation_frame(frame);
+    generation_frame.set(variable_, TheBuilder->CreateGEP(source_array->getType()->getArrayElementType()->getPointerTo(), source_array, TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var)));
+    body_->codegen(&generation_frame);
+    TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(1)), iterator_var);
+    auto array_comp_loop_end = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateCondBr(
+      TheBuilder->CreateICmpULT(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(source_array->getType()->getArrayNumElements())),
+      array_comp_loop,
+      array_comp_loop_end
+    );
+    TheBuilder->SetInsertPoint(array_comp_loop_end);
+
+    return llvm::PoisonValue::get(TheBuilder->getVoidTy());
+  }
 
  private:
   std::string variable_;
@@ -1280,7 +1805,7 @@ class ASTArrayComprehension : public ASTNode {
     delete body_;
   }
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "ArrayComprehension: " << variable_
+    out << indent(level) << "ArrayComprehension: " << variable_
         << std::endl;
     array_->print(out, level + 1);
     body_->print(out, level + 1);
@@ -1332,7 +1857,28 @@ class ASTArrayComprehension : public ASTNode {
         ":" + body_->returnType(runner, &newStackFrame);
     return type;
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto source_array = array_->codegen(frame);
+    auto dest_array = TheBuilder->CreateAlloca(source_array->getType());
+    auto iterator_var = TheBuilder->CreateAlloca(TheBuilder->getInt64Ty());
+    TheBuilder->CreateStore(TheBuilder->getInt64(0), iterator_var);
 
+    auto array_comp_loop = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateBr(array_comp_loop);
+    CompilerStackFrame generation_frame(frame);
+    generation_frame.set(variable_, TheBuilder->CreateGEP(source_array->getType()->getArrayElementType()->getPointerTo(), source_array, TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var)));
+    auto result_val = body_->codegen(&generation_frame);
+    TheBuilder->CreateStore(result_val, TheBuilder->CreateGEP(source_array->getType()->getArrayElementType()->getPointerTo(), dest_array, std::vector<llvm::Value *>({TheBuilder->getInt64(0), TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var)})));
+    TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(1)), iterator_var);
+    auto array_comp_loop_end = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateCondBr(
+      TheBuilder->CreateICmpULT(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(source_array->getType()->getArrayNumElements())),
+      array_comp_loop,
+      array_comp_loop_end
+    );
+    TheBuilder->SetInsertPoint(array_comp_loop_end);
+    return TheBuilder->CreateLoad(dest_array->getAllocatedType(), dest_array);
+  }
  private:
   std::string variable_;
   ASTNode *array_;
@@ -1347,7 +1893,7 @@ class ASTRange : public ASTNode {
     delete end_;
   }
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Range: " << std::endl;
+    out << indent(level) << "Range: " << std::endl;
     start_->print(out, level + 1);
     end_->print(out, level + 1);
   }
@@ -1373,6 +1919,29 @@ class ASTRange : public ASTNode {
     std::string type = "array-" + std::to_string(length) + ":i64";
     return type;
   }
+
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto start = start_->codegen(frame);
+    auto end = end_->codegen(frame);
+    auto len = TheBuilder->CreateSub(end, start);
+    auto storage = TheBuilder->CreateAlloca(start->getType(), len);
+    auto iterator_var = TheBuilder->CreateAlloca(start->getType());
+    TheBuilder->CreateStore(0, iterator_var);
+    auto loop_body = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateBr(loop_body);
+    TheBuilder->SetInsertPoint(loop_body);
+    TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var), start), TheBuilder->CreateGEP(storage->getAllocatedType()->getArrayElementType()->getPointerTo(), storage, std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var)})));
+    TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var), TheBuilder->getInt64(1)), iterator_var);
+    auto loop_end = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateCondBr(
+      TheBuilder->CreateICmpULT(TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var), len),
+      loop_body,
+      loop_end
+    );
+    TheBuilder->SetInsertPoint(loop_end);
+    return TheBuilder->CreateLoad(storage->getAllocatedType(), storage);
+  }
+  
 
  private:
   ASTNode *start_;
@@ -1625,7 +2194,7 @@ class Parser {
     return result;
   }
 
-  ASTNode *parseFunctionArg() {
+  ASTFunctionArg *parseFunctionArg() {
     std::string name;
     int _p = 0;
     while (isValidIdentifierChar(in_.peek(), _p)) {
@@ -1643,10 +2212,10 @@ class Parser {
     return new ASTFunctionArg(type, name, in_.tellg());
   }
 
-  ASTNodeList *parseFunctionArgs() {
-    ASTNodeList *result = new ASTNodeList(in_.tellg());
+  std::vector<ASTFunctionArg *> parseFunctionArgs() {
+    std::vector<ASTFunctionArg *> result;
     while (in_.peek() != '{') {
-      result->add(parseFunctionArg());
+      result.push_back(parseFunctionArg());
       skipWhitespace();
 
       if (in_.peek() == ',') {
@@ -1663,7 +2232,7 @@ class Parser {
       throw std::runtime_error("Expected '%'");
     }
     skipWhitespace();
-    ASTNodeList *args = parseFunctionArgs();
+    std::vector<ASTFunctionArg *> args = parseFunctionArgs();
     if (in_.get() != '{') {
       throw std::runtime_error("Expected '{'");
     }
@@ -1992,8 +2561,89 @@ int main() {
 
   int exitCode = 0;
 
-  Runner runner(ast, code);
+  std::string Error;
+  //TODO: Parse from command line args
+  auto triple_name_str = llvm::sys::getDefaultTargetTriple();
+  auto CPU = "generic";
+ 
+    auto TargetTriple = llvm::sys::getDefaultTargetTriple();
+  Module->setTargetTriple(TargetTriple);
+  auto Target = llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
+  llvm::TargetOptions opt;
+  auto RM = llvm::Optional<llvm::Reloc::Model>();
+  auto Features = "";
 
+  auto TheTargetMachine =
+      Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM);
+  
+  auto DL = llvm::DataLayout(&*Module);
+  
+  llvm::Function::Create(llvm::FunctionType::get(TheBuilder->getVoidTy()->getPointerTo(), std::vector<llvm::Type *>({TheBuilder->getVoidTy()->getPointerTo(), TheBuilder->getIntPtrTy(DL), TheBuilder->getInt32Ty(), TheBuilder->getInt32Ty(),TheBuilder->getInt32Ty(), TheBuilder->getInt64Ty()}), false), llvm::GlobalObject::ExternalLinkage, "mmap", *Module);
+
+  
+  auto entry = llvm::Function::Create(llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), std::vector<llvm::Type *>(), false), llvm::GlobalValue::ExternalLinkage, "main", *Module);
+  auto program = llvm::BasicBlock::Create(*TheContext, "", entry);
+  TheBuilder->SetInsertPoint(program);
+  CompilerStackFrame frame;
+  ast->codegen(&frame);
+  llvm::InitializeAllTargetInfos();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmParsers();
+  llvm::InitializeAllAsmPrinters();
+
+  
+  llvm::verifyModule(*Module, &llvm::errs());
+  // OPTIMIZATION PASSES
+  // pre-opt print
+  Module->print(llvm::errs(), nullptr);
+
+  llvm::PassBuilder pb;
+  llvm::LoopAnalysisManager lam;
+  llvm::FunctionAnalysisManager fam;
+  llvm::CGSCCAnalysisManager cgsccam;
+  llvm::ModuleAnalysisManager mam;
+
+  pb.registerModuleAnalyses(mam);
+  pb.registerCGSCCAnalyses(cgsccam);
+  pb.registerFunctionAnalyses(fam);
+  pb.registerLoopAnalyses(lam);
+
+  pb.crossRegisterProxies(lam, fam, cgsccam, mam);
+
+  llvm::ModulePassManager module_pass_manager =
+      pb.buildPerModuleDefaultPipeline(
+          llvm::OptimizationLevel::O2);
+
+  module_pass_manager.run(*Module, mam);
+  // re-verify post optimization
+  llvm::verifyModule(*Module, &llvm::errs());
+  // TODO: get output file name
+  std::error_code EC;
+  auto output_file = "out.o";
+  llvm::raw_fd_ostream dest(output_file, EC, llvm::sys::fs::OF_None);
+
+  if (EC) {
+    llvm::errs() << "Could not open file: " << EC.message();
+    return 1;
+  }
+
+  llvm::legacy::PassManager pass;
+  auto FileType = llvm::CGFT_ObjectFile;
+  // check module
+  Module->print(llvm::errs(), nullptr);
+
+  if (TheTargetMachine->addPassesToEmitFile(pass, dest, nullptr, FileType)) {
+    llvm::errs() << "TheTargetMachine can't emit a file of this type";
+    return 1;
+  }
+
+  pass.run(*Module);
+  dest.flush();
+  llvm::outs() << "Wrote output to " << output_file << "\n";
+
+  Runner runner(ast, code);
+  /*
   runner.generateFunction("print",
                           new ASTNodeList({new ASTFunctionArg(
                               new ASTPointer(new ASTBaseType("char")), "str")}),
@@ -2034,4 +2684,6 @@ int main() {
   runner.run(&exitCode);
 
   return exitCode;
+  */
+  return 0;
 }
