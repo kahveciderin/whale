@@ -7,6 +7,8 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <llvm/ADT/APInt.h>
+#include <llvm/ADT/Sequence.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/Analysis/LoopAnalysisManager.h>
@@ -52,6 +54,12 @@
 std::unique_ptr<llvm::LLVMContext> TheContext;
 std::unique_ptr<llvm::IRBuilder<>> TheBuilder;
 std::unique_ptr<llvm::Module> Module;
+
+class WithPos {
+  public:
+  WithPos(unsigned long p) : pos_(p) {}
+  unsigned long pos_;
+};
 
 std::string indent(int level) {
     std::string s;
@@ -193,9 +201,9 @@ class ASTNodeList;
 class Runner;
 class RunnerStackFrame;
 
-class ASTNode {
+class ASTNode : public WithPos {
  public:
-  ASTNode(unsigned long pos) : pos_(pos) {}
+  ASTNode(unsigned long pos) : WithPos(pos) {}
   virtual ~ASTNode() {}
   virtual void print(std::ostream &out, int level = 0) const = 0;
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -206,10 +214,13 @@ class ASTNode {
 
   virtual llvm::Value *codegen(CompilerStackFrame *frame) = 0;
 };
-class ASTType {
+class ASTType : public WithPos {
   public:
     //TODO: Commenting this out causes many warnings but makes the code compile.
     //virtual ~ASTType();
+
+    ASTType(unsigned long pos) : WithPos(pos) {}
+
     virtual llvm::Type *into_llvm_type() = 0;
 
     //weird interpreter / parser stuff stuff
@@ -385,12 +396,12 @@ class ASTNodeList : public ASTNode {
 
  private:
 };
-class ASTArrayLiteral : public ASTType {
+class ASTArrayLiteral : public ASTNode {
  public:
   ASTArrayLiteral(ASTNodeList *list, unsigned long pos = 0)
-      : ASTType(pos), list_(list) {}
+      : ASTNode(pos), list_(list) {}
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "ArrayLiteral: " << std::endl;
+    out << indent(level) << "ArrayLiteral: " << std::endl;
     list_->print(out, level + 1);
   }
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
@@ -437,6 +448,20 @@ class ASTArrayLiteral : public ASTType {
     return "array-" + std::to_string(list_->nodes_.size()) + ":" + type;
   }
 
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    std::vector<llvm::Value *> values;
+    for (auto node : list_->nodes_) {
+      values.push_back(node->codegen(frame));
+    }
+    auto pointer_to_list = TheBuilder->CreateAlloca(llvm::ArrayType::get(values[0]->getType(), values.size()));
+    int idx = 0;
+    for (auto value : values) {
+      TheBuilder->CreateStore(value, TheBuilder->CreateGEP(value->getType()->getPointerTo(), pointer_to_list, std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(idx)})));
+      idx++;
+    }
+    return TheBuilder->CreateLoad(pointer_to_list->getAllocatedType(), pointer_to_list);
+  }
+
  private:
   ASTNodeList *list_;
 };
@@ -470,10 +495,10 @@ class ASTTemplate : public ASTType {
   std::string name_;
 };
 
-class ASTFunctionArg {
+class ASTFunctionArg : public WithPos {
  public:
-  ASTFunctionArg(ASTType *type, const std::string &name)
-      : type_(type), name_(name) {}
+  ASTFunctionArg(ASTType *type, const std::string &name, unsigned long pos)
+      : type_(type), name_(name), WithPos(pos) {}
 
   virtual void print(std::ostream &out, int level) const {
     out << indent(level) << "Argument: " << name_ << std::endl;
@@ -497,7 +522,7 @@ class ASTFunctionArg {
 class ASTLambda : public ASTNode {
  public:
   ASTLambda(std::vector<ASTFunctionArg *> args, ASTNode *body, ASTType *type, unsigned long pos = 0)
-      : args_(args), body_(body), type_(type) {}
+      : args_(args), body_(body), type_(type), ASTNode(pos) {}
 
   virtual ~ASTLambda() { delete body_; }
 
@@ -738,32 +763,6 @@ class ASTArray : public ASTType {
   ASTNode *size_;
 };
 
-class ASTFunctionArg : public ASTNode {
- public:
-  ASTFunctionArg(ASTType *type, const std::string &name, unsigned long pos = 0)
-      : ASTNode(pos), name_(name), type_(type) {}
-
-  virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Argument: " << name_ << std::endl;
-    type_->print(out, level + 1);
-  }
-
-  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
-                   void *out) const {
-    void *ptr = stackFrame->allocVariable(name_, (ASTType *)type_, runner);
-    *(void **)out = ptr;
-  }
-
-  virtual const std::string returnType(Runner *runner,
-                                       RunnerStackFrame *stack) const {
-    return type_->returnType(runner, stack);
-  }
-  std::string name_;
-
- private:
-  ASTType *type_;
-};
-
 class ASTNumber : public ASTNode {
  public:
   ASTNumber(long int value, unsigned long pos = 0)
@@ -794,7 +793,7 @@ class ASTChar : public ASTNode {
   ASTChar(char value, unsigned long pos = 0)
       : ASTNode(pos), value_(value) {}
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Char: " << value_ << std::endl;
+    out << indent(level) << "Char: " << value_ << std::endl;
   }
   virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
                    void *out) const {
@@ -803,6 +802,9 @@ class ASTChar : public ASTNode {
   virtual const std::string returnType(Runner *runner,
                                        RunnerStackFrame *stack) const {
     return "char";
+  }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    return TheBuilder->getInt8(value_);
   }
  private:
   char value_;
@@ -1661,7 +1663,7 @@ class ASTArrayAccess : public ASTNode {
     delete index_;
   }
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "ArrayAccess: " << std::endl;
+    out << indent(level) << "ArrayAccess: " << std::endl;
     array_->print(out, level + 1);
     index_->print(out, level + 1);
   }
@@ -1694,6 +1696,11 @@ class ASTArrayAccess : public ASTNode {
 
     return array_->returnType(runner, stack)
         .substr(array_->returnType(runner, stack).find(':') + 1);
+  }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto array_val = array_->codegen(frame);
+    auto idx = index_->codegen(frame);
+    return TheBuilder->CreateExtractElement(array_val, idx);
   }
 
  private:
@@ -1728,7 +1735,7 @@ class ASTForIn : public ASTNode {
     delete body_;
   }
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "ForIn: " << variable_ << std::endl;
+    out << indent(level) << "ForIn: " << variable_ << std::endl;
     array_->print(out, level + 1);
     body_->print(out, level + 1);
   }
@@ -1761,6 +1768,27 @@ class ASTForIn : public ASTNode {
                                        RunnerStackFrame *stack) const {
     return "void";
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto source_array = array_->codegen(frame);
+    auto iterator_var = TheBuilder->CreateAlloca(TheBuilder->getInt64Ty());
+    TheBuilder->CreateStore(TheBuilder->getInt64(0), iterator_var);
+
+    auto array_comp_loop = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateBr(array_comp_loop);
+    CompilerStackFrame generation_frame(frame);
+    generation_frame.set(variable_, TheBuilder->CreateGEP(source_array->getType()->getArrayElementType()->getPointerTo(), source_array, TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var)));
+    body_->codegen(&generation_frame);
+    TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(1)), iterator_var);
+    auto array_comp_loop_end = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateCondBr(
+      TheBuilder->CreateICmpULT(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(source_array->getType()->getArrayNumElements())),
+      array_comp_loop,
+      array_comp_loop_end
+    );
+    TheBuilder->SetInsertPoint(array_comp_loop_end);
+
+    return llvm::PoisonValue::get(TheBuilder->getVoidTy());
+  }
 
  private:
   std::string variable_;
@@ -1777,7 +1805,7 @@ class ASTArrayComprehension : public ASTNode {
     delete body_;
   }
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "ArrayComprehension: " << variable_
+    out << indent(level) << "ArrayComprehension: " << variable_
         << std::endl;
     array_->print(out, level + 1);
     body_->print(out, level + 1);
@@ -1829,7 +1857,28 @@ class ASTArrayComprehension : public ASTNode {
         ":" + body_->returnType(runner, &newStackFrame);
     return type;
   }
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto source_array = array_->codegen(frame);
+    auto dest_array = TheBuilder->CreateAlloca(source_array->getType());
+    auto iterator_var = TheBuilder->CreateAlloca(TheBuilder->getInt64Ty());
+    TheBuilder->CreateStore(TheBuilder->getInt64(0), iterator_var);
 
+    auto array_comp_loop = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateBr(array_comp_loop);
+    CompilerStackFrame generation_frame(frame);
+    generation_frame.set(variable_, TheBuilder->CreateGEP(source_array->getType()->getArrayElementType()->getPointerTo(), source_array, TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var)));
+    auto result_val = body_->codegen(&generation_frame);
+    TheBuilder->CreateStore(result_val, TheBuilder->CreateGEP(source_array->getType()->getArrayElementType()->getPointerTo(), dest_array, std::vector<llvm::Value *>({TheBuilder->getInt64(0), TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var)})));
+    TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(1)), iterator_var);
+    auto array_comp_loop_end = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateCondBr(
+      TheBuilder->CreateICmpULT(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(source_array->getType()->getArrayNumElements())),
+      array_comp_loop,
+      array_comp_loop_end
+    );
+    TheBuilder->SetInsertPoint(array_comp_loop_end);
+    return TheBuilder->CreateLoad(dest_array->getAllocatedType(), dest_array);
+  }
  private:
   std::string variable_;
   ASTNode *array_;
@@ -1844,7 +1893,7 @@ class ASTRange : public ASTNode {
     delete end_;
   }
   virtual void print(std::ostream &out, int level) const {
-    out << this->indent(level) << "Range: " << std::endl;
+    out << indent(level) << "Range: " << std::endl;
     start_->print(out, level + 1);
     end_->print(out, level + 1);
   }
@@ -1870,6 +1919,29 @@ class ASTRange : public ASTNode {
     std::string type = "array-" + std::to_string(length) + ":i64";
     return type;
   }
+
+  virtual llvm::Value *codegen(CompilerStackFrame *frame) {
+    auto start = start_->codegen(frame);
+    auto end = end_->codegen(frame);
+    auto len = TheBuilder->CreateSub(end, start);
+    auto storage = TheBuilder->CreateAlloca(start->getType(), len);
+    auto iterator_var = TheBuilder->CreateAlloca(start->getType());
+    TheBuilder->CreateStore(0, iterator_var);
+    auto loop_body = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateBr(loop_body);
+    TheBuilder->SetInsertPoint(loop_body);
+    TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var), start), TheBuilder->CreateGEP(storage->getAllocatedType()->getArrayElementType()->getPointerTo(), storage, std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var)})));
+    TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var), TheBuilder->getInt64(1)), iterator_var);
+    auto loop_end = llvm::BasicBlock::Create(*TheContext);
+    TheBuilder->CreateCondBr(
+      TheBuilder->CreateICmpULT(TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var), len),
+      loop_body,
+      loop_end
+    );
+    TheBuilder->SetInsertPoint(loop_end);
+    return TheBuilder->CreateLoad(storage->getAllocatedType(), storage);
+  }
+  
 
  private:
   ASTNode *start_;
