@@ -4,6 +4,8 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Instruction.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Type.h>
 #include <sys/mman.h>
 
@@ -198,9 +200,10 @@ llvm::Value *ASTLambda::codegen(CompilerStackFrame *frame) {
   }
   //create trampoline intrinsic
   //TODO unmapping this memory sometime is something to be considered.
-  auto tramp_memory = TheBuilder->CreateCall(Module->getFunction("mmap"), std::vector<llvm::Value *>({TheBuilder->CreateCast(llvm::Instruction::BitCast, TheBuilder->getInt64(0), TheBuilder->getInt8PtrTy()), TheBuilder->getInt64(72), TheBuilder->getInt32(PROT_READ | PROT_WRITE | PROT_EXEC), TheBuilder->getInt32(MAP_ANONYMOUS | MAP_PRIVATE), TheBuilder->getInt32(0), TheBuilder->getInt64(0)}));
-  TheBuilder->CreateIntrinsic(llvm::Intrinsic::init_trampoline, std::vector<llvm::Type *>({TheBuilder->getInt8PtrTy(), TheBuilder->getInt8PtrTy(), TheBuilder->getInt8PtrTy()}), std::vector<llvm::Value *>({tramp_memory, lambda_func, the_trampoline_object}));
-  auto the_final_func_ptr = TheBuilder->CreateUnaryIntrinsic(llvm::Intrinsic::adjust_trampoline, tramp_memory);
+  auto tramp_memory = TheBuilder->CreateCall(Module->getFunction("mmap"), std::vector<llvm::Value *>({TheBuilder->CreateCast(llvm::Instruction::BitCast, TheBuilder->getInt64(0), TheBuilder->getVoidTy()->getPointerTo()), TheBuilder->getInt64(72), TheBuilder->getInt32(PROT_READ | PROT_WRITE | PROT_EXEC), TheBuilder->getInt32(MAP_ANONYMOUS | MAP_PRIVATE), TheBuilder->getInt32(0), TheBuilder->getInt64(0)}));
+
+  TheBuilder->CreateIntrinsic(llvm::Intrinsic::init_trampoline, std::vector<llvm::Type *>({}), std::vector<llvm::Value *>({TheBuilder->CreatePointerCast(tramp_memory, TheBuilder->getInt8PtrTy()), TheBuilder->CreatePointerCast(lambda_func, TheBuilder->getInt8PtrTy()), TheBuilder->CreatePointerCast(the_trampoline_object, TheBuilder->getInt8PtrTy())}));
+  auto the_final_func_ptr = TheBuilder->CreateIntrinsic(llvm::Intrinsic::adjust_trampoline, std::vector<llvm::Type *>({}), std::vector<llvm::Value *>({TheBuilder->CreatePointerCast(tramp_memory, TheBuilder->getInt8PtrTy())}));
   total_args.erase(total_args.begin());
   
   return TheBuilder->CreateCast(llvm::Instruction::BitCast, the_final_func_ptr, llvm::FunctionType::get(type_->into_llvm_type(), total_args, false)->getPointerTo());
@@ -400,7 +403,7 @@ llvm::Value *ASTCast::codegen(CompilerStackFrame *frame) {
   auto type_from = orig_val->getType();
   auto type_to = type_->into_llvm_type();
   if (type_to->isPointerTy() && type_from->isPointerTy()) {
-    //bitcast will suffice
+    op = llvm::Instruction::CastOps::BitCast;
   } else if (type_from->isFloatTy()) {
     if (type_to->isFloatTy()) {
       if (type_from->canLosslesslyBitCastTo(type_to)) {
@@ -462,7 +465,8 @@ ASTVariableAssign::~ASTVariableAssign() { delete value_; }
 
 llvm::Value *ASTVariableAssign::codegen(CompilerStackFrame *frame) {
   auto varspace = frame->resolve(name_);
-  auto val = value_->codegen(frame);
+  auto val = TheBuilder->CreateBitCast(value_->codegen(frame), varspace->getType()->getPointerElementType());
+
   TheBuilder->CreateStore(val, varspace);
   return val;
 }
@@ -518,7 +522,9 @@ llvm::Value *ASTIf::codegen(CompilerStackFrame *frame) {
   TheBuilder->SetInsertPoint(body_else);
   {
     CompilerStackFrame frame_else(frame);
-    else_ret = body_->codegen(&frame_else);
+    if (elseBody_) {
+      else_ret = elseBody_->codegen(&frame_else);
+    }
   }
   auto ty_t = body_ret->getType();
   auto ty_f = else_ret->getType();
@@ -582,7 +588,7 @@ llvm::Value *ASTReturn::codegen(CompilerStackFrame *frame) {
   if (val->getType()->isVoidTy()) {
     TheBuilder->CreateRetVoid();
   } else {
-    TheBuilder->CreateRet(val);
+    TheBuilder->CreateRet(TheBuilder->CreateBitCast(val, TheBuilder->getCurrentFunctionReturnType()));
   }
   
   return llvm::PoisonValue::get(TheBuilder->getVoidTy());
@@ -611,6 +617,13 @@ ASTNull::~ASTNull() {}
 
 llvm::Value *ASTNull::codegen(CompilerStackFrame *frame) {
   return llvm::ConstantPointerNull::get(TheBuilder->getVoidTy()->getPointerTo());
+}
+ASTVoid::ASTVoid(unsigned long pos) : ASTNode(pos) {}
+
+ASTVoid::~ASTVoid() {}
+
+llvm::Value *ASTVoid::codegen(CompilerStackFrame *frame) {
+  return llvm::PoisonValue::get(TheBuilder->getVoidTy());
 }
 
 ASTBool::ASTBool(bool value, unsigned long pos) : ASTNode(pos), value_(value) {}

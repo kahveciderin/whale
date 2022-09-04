@@ -145,6 +145,10 @@ void ASTNull::print(std::ostream &out, int level) const {
   out << indent(level) << "Null" << std::endl;
 }
 
+void ASTVoid::print(std::ostream &out, int level) const {
+  out << indent(level) << "Void" << std::endl;
+}
+
 void ASTBool::print(std::ostream &out, int level) const {
   out << indent(level) << "Bool: " << value_ << std::endl;
 }

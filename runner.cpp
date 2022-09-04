@@ -588,6 +588,15 @@ const std::string ASTNull::returnType(Runner *runner,
   return "pointer:void";
 }
 
+void ASTVoid::run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  if (out != nullptr) {
+    *(unsigned long *)out = 0;
+  }
+};
+const std::string ASTVoid::returnType(Runner *runner, RunnerStackFrame *stack) const {
+  return "void";
+};
+
 void ASTBool::run(Runner *runner, RunnerStackFrame *stackFrame,
                   void *out) const {
   if (out != nullptr) {

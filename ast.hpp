@@ -550,6 +550,20 @@ class ASTNull : public ASTNode {
 
  private:
 };
+class ASTVoid : public ASTNode {
+  public:
+  ASTVoid(unsigned long pos = 0);
+
+  virtual ~ASTVoid();
+
+  virtual void print(std::ostream &out, int level) const;
+
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const;
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const;
+  virtual llvm::Value *codegen(CompilerStackFrame *frame);
+};
 class ASTBool : public ASTNode {
  public:
   ASTBool(bool value, unsigned long pos = 0);

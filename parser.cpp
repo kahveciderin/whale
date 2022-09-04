@@ -192,7 +192,7 @@ if (in_.peek() == '=') {
 } else {
     value = nullptr;
 }
-return new ASTVariableDecl(name, type, value, in_.tellg());
+return new ASTVariableDecl(name, type, new ASTCast(value, type, in_.tellg()), in_.tellg());
 }
 
 ASTType *Parser::parseType() {
@@ -408,7 +408,8 @@ if (in_.peek() == '-') {
     return new ASTLambda(args, body, type, in_.tellg());
     }
 }
-body->add(new ASTReturn(new ASTNumber(0, in_.tellg()), in_.tellg()));
+
+body->add(new ASTReturn(new ASTVoid(in_.tellg()), in_.tellg()));
 return new ASTLambda(args, body, new ASTBaseType("void", in_.tellg()),
                         in_.tellg());
 }

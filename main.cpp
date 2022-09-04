@@ -75,7 +75,7 @@ int main() {
   llvm::InitializeAllTargetMCs();
   llvm::InitializeAllAsmParsers();
   llvm::InitializeAllAsmPrinters();
-  std::ifstream file("tests/fib.wha");
+  std::ifstream file("tests/hello.wha");
   std::istream &code = static_cast<std::istream &>(file);
 
   Parser parser(code);
@@ -117,7 +117,6 @@ int main() {
   llvm::Function::Create(llvm::FunctionType::get(TheBuilder->getInt32Ty(), std::vector<llvm::Type *>({TheBuilder->getInt8PtrTy()}), true), llvm::GlobalObject::ExternalLinkage, "printf", *Module);
   
   llvm::Function::Create(llvm::FunctionType::get(TheBuilder->getVoidTy()->getPointerTo(), std::vector<llvm::Type *>({TheBuilder->getVoidTy()->getPointerTo(), TheBuilder->getIntPtrTy(DL), TheBuilder->getInt32Ty(), TheBuilder->getInt32Ty(),TheBuilder->getInt32Ty(), TheBuilder->getInt64Ty()}), false), llvm::GlobalObject::ExternalLinkage, "mmap", *Module);
-  
   auto entry = llvm::Function::Create(llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), std::vector<llvm::Type *>(), false), llvm::GlobalValue::ExternalLinkage, "main", *Module);
   auto program = llvm::BasicBlock::Create(*TheContext, "", entry);
   TheBuilder->SetInsertPoint(program);
