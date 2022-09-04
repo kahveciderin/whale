@@ -1,5 +1,8 @@
 #include "parser.hpp"
+#include "ast.hpp"
 #include <iostream>
+#include <stdexcept>
+#include <vector>
 ValueType parseType(std::string type) {
   type = type.substr(0, type.find(':'));
   type = type.substr(0, type.find('-'));
@@ -193,46 +196,70 @@ return new ASTVariableDecl(name, type, value, in_.tellg());
 }
 
 ASTType *Parser::parseType() {
-skipWhitespace();
-if (in_.peek() == EOF) {
-    throw std::runtime_error("Unexpected EOF");
-}
-std::streampos oldpos = in_.tellg();
-std::string name = parseIdentifier();
-skipWhitespace();
-if (in_.peek() == '<') {
-    in_.get();
     skipWhitespace();
-    ASTType *type = parseType();
-    skipWhitespace();
-    if (in_.peek() != '>') {
-    throw std::runtime_error("Expected >");
+    if (in_.peek() == EOF) {
+        throw std::runtime_error("Unexpected EOF");
     }
-    in_.get();
+    std::streampos oldpos = in_.tellg();
+    std::string name = parseIdentifier();
     skipWhitespace();
-    return new ASTTemplate(type, name, in_.tellg());
-}
-std::streampos newpos = in_.tellg();
-in_.seekg(oldpos);
+    if (name == "fun") {
+        if (in_.get() != '(') {
+            throw std::runtime_error("Expected '('");
+        }
+        skipWhitespace();
+        ASTType *return_type = parseType();
+        skipWhitespace();
+        if (in_.peek() == ',') {
+            in_.get();
+        }
+        skipWhitespace();
 
-if (in_.peek() == '*') {
-    in_.get();
-    return new ASTPointer(parseType(), in_.tellg());
-} else if (in_.peek() == '[') {
-    in_.get();
-    if (in_.peek() == ']') {
-    in_.get();
-    return new ASTArray(parseType(), new ASTNumber(0, in_.tellg()),
-                        in_.tellg());
+        std::vector<ASTType *> argtypes;
+        while (in_.peek() != ')') {
+            argtypes.push_back(parseType());
+            skipWhitespace();
+            if (in_.peek() == ',') {
+                in_.get();
+            }
+            skipWhitespace();
+        }
+        in_.get();
+        return new ASTFunctionType(return_type, argtypes, oldpos);
     }
-    ASTNode *size = parseExpression();
-    if (in_.get() != ']') {
-    throw std::runtime_error("Expected ']'");
+    if (in_.peek() == '<') {
+        in_.get();
+        skipWhitespace();
+        ASTType *type = parseType();
+        skipWhitespace();
+        if (in_.peek() != '>') {
+        throw std::runtime_error("Expected >");
+        }
+        in_.get();
+        skipWhitespace();
+        return new ASTTemplate(type, name, in_.tellg());
     }
-    return new ASTArray(parseType(), size, in_.tellg());
-}
-in_.seekg(newpos);
-return new ASTBaseType(name, in_.tellg());
+    std::streampos newpos = in_.tellg();
+    in_.seekg(oldpos);
+
+    if (in_.peek() == '*') {
+        in_.get();
+        return new ASTPointer(parseType(), in_.tellg());
+    } else if (in_.peek() == '[') {
+        in_.get();
+        if (in_.peek() == ']') {
+        in_.get();
+        return new ASTArray(parseType(), new ASTNumber(0, in_.tellg()),
+                            in_.tellg());
+        }
+        ASTNode *size = parseExpression();
+        if (in_.get() != ']') {
+        throw std::runtime_error("Expected ']'");
+        }
+        return new ASTArray(parseType(), size, in_.tellg());
+    }
+    in_.seekg(newpos);
+    return new ASTBaseType(name, in_.tellg());
 }
 
 ASTNodeList *Parser::parseGlobalBody() {

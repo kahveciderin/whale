@@ -36,11 +36,13 @@
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetLoweringObjectFile.h>
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/Target/TargetMachine.h>
 #include <map>
 #include <memory>
+#include <ostream>
 #include <sstream>
 #include <string>
 #include <sys/types.h>
@@ -67,8 +69,13 @@ void init_module() {
 
 int main() {
   std::cout.precision(std::numeric_limits<double>::max_digits10);
-
-  std::ifstream file("tests/initial.wha");
+  init_module();
+  llvm::InitializeAllTargetInfos();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmParsers();
+  llvm::InitializeAllAsmPrinters();
+  std::ifstream file("tests/fib.wha");
   std::istream &code = static_cast<std::istream &>(file);
 
   Parser parser(code);
@@ -93,6 +100,11 @@ int main() {
     auto TargetTriple = llvm::sys::getDefaultTargetTriple();
   Module->setTargetTriple(TargetTriple);
   auto Target = llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
+  if (!Target) {
+    llvm::errs() << Error;
+    llvm::errs().flush();
+    return -1;
+  }
   llvm::TargetOptions opt;
   auto RM = llvm::Optional<llvm::Reloc::Model>();
   auto Features = "";
@@ -101,20 +113,23 @@ int main() {
       Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM);
   
   auto DL = llvm::DataLayout(&*Module);
+  //for testing
+  llvm::Function::Create(llvm::FunctionType::get(TheBuilder->getInt32Ty(), std::vector<llvm::Type *>({TheBuilder->getInt8PtrTy()}), true), llvm::GlobalObject::ExternalLinkage, "printf", *Module);
   
   llvm::Function::Create(llvm::FunctionType::get(TheBuilder->getVoidTy()->getPointerTo(), std::vector<llvm::Type *>({TheBuilder->getVoidTy()->getPointerTo(), TheBuilder->getIntPtrTy(DL), TheBuilder->getInt32Ty(), TheBuilder->getInt32Ty(),TheBuilder->getInt32Ty(), TheBuilder->getInt64Ty()}), false), llvm::GlobalObject::ExternalLinkage, "mmap", *Module);
-
   
   auto entry = llvm::Function::Create(llvm::FunctionType::get(llvm::Type::getVoidTy(*TheContext), std::vector<llvm::Type *>(), false), llvm::GlobalValue::ExternalLinkage, "main", *Module);
   auto program = llvm::BasicBlock::Create(*TheContext, "", entry);
   TheBuilder->SetInsertPoint(program);
   CompilerStackFrame frame;
-  ast->codegen(&frame);
-  llvm::InitializeAllTargetInfos();
-  llvm::InitializeAllTargets();
-  llvm::InitializeAllTargetMCs();
-  llvm::InitializeAllAsmParsers();
-  llvm::InitializeAllAsmPrinters();
+
+  try {
+    ast->codegen(&frame);
+  } catch (std::exception e) {
+    std::cerr << e.what() << std::endl;
+    std::cerr.flush();
+    return -1;
+  }
 
   
   llvm::verifyModule(*Module, &llvm::errs());

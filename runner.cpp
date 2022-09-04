@@ -101,6 +101,18 @@ const std::string ASTBaseType::returnType(Runner *runner,
   return name_;
 }
 
+void ASTFunctionType::run(Runner *runner, RunnerStackFrame *stackFrame, void *out) const {
+  *(int *)out = sizeOfType("fun");
+}
+const std::string ASTFunctionType::returnType(Runner *runner, RunnerStackFrame *stack) const {
+  std::string args;
+  for (auto arg : arg_types_) {
+    args += ",";
+    args += arg->returnType(runner, stack);
+  }
+  return std::string() + "fun(" + ret_type_->returnType(runner, stack) + args + ")" + std::string();
+}
+
 void ASTNodeList::run(Runner *runner, RunnerStackFrame *stackFrame,
                   void *out) const {
   RunnerStackFrame newStackFrame(stackFrame);

@@ -1,8 +1,8 @@
-fun returnsarr = %{
+fun([3]i64) returnsarr = %{
     ret [1, 4, 6];
 } -> [3]i64;
 
-fun main = %{
+fun(void) main = %{
     [2][3]i64 myArr1 = [
         [1, 2, 3],
         [4, 5, 6]

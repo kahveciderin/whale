@@ -1,5 +1,9 @@
 #include "ast.hpp"
 #include "parser.hpp"
+#include <exception>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/Function.h>
 #include <llvm/IR/Type.h>
 #include <sys/mman.h>
 
@@ -16,8 +20,13 @@ llvm::Value *CompilerStackFrame::resolve(std::string name) {
     if (parent) {
     //tail call optimization
     return parent->resolve(name);
+    } else {
+      auto glob_val = Module->getNamedGlobal(name);
+      if (glob_val) {
+        return glob_val;
+      }
     }
-    throw "Undefined variable " + name;
+    throw std::string("Undefined variable ") + name;
 }
 
 
@@ -56,7 +65,8 @@ llvm::Type *ASTBaseType::into_llvm_type() {
     case ValueType::i64:
       return llvm::Type::getInt64Ty(*TheContext);
     case ValueType::fun:
-      return llvm::Type::getPrimitiveType(*TheContext, llvm::Type::FunctionTyID);
+      //opaque pointer
+      return llvm::Type::getVoidTy(*TheContext)->getPointerTo();
     case ValueType::float_:
       return llvm::Type::getFloatTy(*TheContext);
     case ValueType::double_:
@@ -135,6 +145,7 @@ ASTLambda::~ASTLambda() { delete body_; }
 
 llvm::Value *ASTLambda::codegen(CompilerStackFrame *frame) {
   std::vector<llvm::Type *> implicit_args;
+  std::vector<llvm::Value *> replace_later;
   std::vector<llvm::Value *> trampoline_object_members;
   std::vector<llvm::Type *> total_args;
   auto lambda_trampoline_data = llvm::StructType::create(*TheContext);
@@ -147,22 +158,19 @@ llvm::Value *ASTLambda::codegen(CompilerStackFrame *frame) {
 
   auto lambda_setup_block = llvm::BasicBlock::Create(*TheContext, "", lambda_func);
   
-  auto lambda_body = llvm::BasicBlock::Create(*TheContext);
+  auto lambda_body = llvm::BasicBlock::Create(*TheContext, "", lambda_func);
   
   auto where_we_left_off = TheBuilder->saveIP();
 
   
   LambdaStackFrame cur_frame(frame, [&](std::string name, llvm::Value *outer_definition) -> llvm::Value * {
-    auto old_ip = TheBuilder->saveIP();
-
-    TheBuilder->SetInsertPoint(lambda_setup_block);
     auto alloc_type = outer_definition->getType();
-    auto proxy_pointer = TheBuilder->CreateGEP(alloc_type, lambda_func->getArg(0), std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(implicit_args.size())}));
+    //auto proxy_pointer = TheBuilder->CreateGEP(lambda_trampoline_data, lambda_func->getArg(0), std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(implicit_args.size())}));
     implicit_args.push_back(alloc_type);
     trampoline_object_members.push_back(outer_definition);
-
-    TheBuilder->restoreIP(old_ip);
-    return proxy_pointer;
+    auto the_val = llvm::PoisonValue::get(alloc_type);
+    replace_later.push_back(the_val);
+    return the_val;
   });
   TheBuilder->SetInsertPoint(lambda_setup_block);
   for (int i=0;i<this->args_.size();i++) {
@@ -170,16 +178,23 @@ llvm::Value *ASTLambda::codegen(CompilerStackFrame *frame) {
     TheBuilder->CreateStore(lambda_func->getArg(i+1), normal_arg_memory);
     cur_frame.set(this->args_[i]->name_, normal_arg_memory);
   }
-  TheBuilder->CreateBr(lambda_body);
+  
   TheBuilder->SetInsertPoint(lambda_body);
   body_->codegen(&cur_frame);
+  lambda_trampoline_data->setBody(implicit_args);
+
+  TheBuilder->SetInsertPoint(lambda_setup_block);
+  for (int i=0;i<replace_later.size();i++) {
+    replace_later[i]->replaceAllUsesWith(TheBuilder->CreateGEP(lambda_trampoline_data, lambda_func->getArg(0), std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(i)})));
+  }
+  TheBuilder->CreateBr(lambda_body);
 
   TheBuilder->restoreIP(where_we_left_off);
-  lambda_trampoline_data->setBody(implicit_args);
+  
   auto the_trampoline_object = TheBuilder->CreateAlloca(lambda_trampoline_data);
   //load our trampoline
   for (int i = 0; i < trampoline_object_members.size(); i++) {
-    TheBuilder->CreateStore(trampoline_object_members[i], TheBuilder->CreateGEP(implicit_args[i], the_trampoline_object, std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(i)})));
+    TheBuilder->CreateStore(trampoline_object_members[i], TheBuilder->CreateGEP(the_trampoline_object->getAllocatedType(), the_trampoline_object, std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(i)})));
   }
   //create trampoline intrinsic
   //TODO unmapping this memory sometime is something to be considered.
@@ -187,7 +202,8 @@ llvm::Value *ASTLambda::codegen(CompilerStackFrame *frame) {
   TheBuilder->CreateIntrinsic(llvm::Intrinsic::init_trampoline, std::vector<llvm::Type *>({TheBuilder->getInt8PtrTy(), TheBuilder->getInt8PtrTy(), TheBuilder->getInt8PtrTy()}), std::vector<llvm::Value *>({tramp_memory, lambda_func, the_trampoline_object}));
   auto the_final_func_ptr = TheBuilder->CreateUnaryIntrinsic(llvm::Intrinsic::adjust_trampoline, tramp_memory);
   total_args.erase(total_args.begin());
-  return TheBuilder->CreateCast(llvm::Instruction::BitCast, the_final_func_ptr, llvm::FunctionType::get(type_->into_llvm_type(), total_args, false));
+  
+  return TheBuilder->CreateCast(llvm::Instruction::BitCast, the_final_func_ptr, llvm::FunctionType::get(type_->into_llvm_type(), total_args, false)->getPointerTo());
 }
 
 ASTNativeFunction::ASTNativeFunction(void (*function)(Runner *, RunnerStackFrame *),
@@ -416,9 +432,13 @@ ASTVariableDecl::~ASTVariableDecl() {
 }
 
 llvm::Value *ASTVariableDecl::codegen(CompilerStackFrame *frame) {
-  auto varspace = TheBuilder->CreateAlloca(type_->into_llvm_type());
-  frame->set(name_, varspace);
-  return llvm::PoisonValue::get(TheBuilder->getVoidTy());
+    auto varspace = TheBuilder->CreateAlloca(type_->into_llvm_type());
+    frame->set(name_, varspace);
+    if (value_) {
+      auto val = value_->codegen(frame);
+      TheBuilder->CreateStore(val, varspace);
+    }
+    return llvm::PoisonValue::get(TheBuilder->getVoidTy());
 }
 
 ASTVariable::ASTVariable(const std::string &name, unsigned long pos)
@@ -457,12 +477,14 @@ ASTFunctionCall::~ASTFunctionCall() { delete args_; }
 
 llvm::Value *ASTFunctionCall::codegen(CompilerStackFrame *frame) {
   //TODO: This feels like it is guaranteed to segfault. Do it anyways.
-  auto fp = static_cast<llvm::Function *>(pointer_->codegen(frame));
+  auto funval_raw = pointer_->codegen(frame);
+  auto the_function_type = llvm::cast<llvm::FunctionType>(funval_raw->getType()->getPointerElementType());
   std::vector<llvm::Value *> args_generated;
   for (auto arg : args_->nodes_) {
     args_generated.push_back(arg->codegen(frame));
   }
-  return TheBuilder->CreateCall(fp, args_generated);
+  
+  return TheBuilder->CreateCall(the_function_type, funval_raw, args_generated);
 }
 
 ASTIf::ASTIf(ASTNode *condition, ASTNode *body, ASTNode *elseBody,
@@ -476,16 +498,17 @@ ASTIf::~ASTIf() {
 }
 
 llvm::Value *ASTIf::codegen(CompilerStackFrame *frame) {
-  auto before_the_if = llvm::BasicBlock::Create(*TheContext);
+  auto parent = TheBuilder->GetInsertBlock()->getParent();
+  auto before_the_if = llvm::BasicBlock::Create(*TheContext, "", parent);
   auto common_var_setup_point = TheBuilder->CreateBr(before_the_if);
   TheBuilder->SetInsertPoint(before_the_if);
   auto if_cond = condition_->codegen(frame);
   
-  auto body = llvm::BasicBlock::Create(*TheContext);
-  auto body_else = llvm::BasicBlock::Create(*TheContext);
+  auto body = llvm::BasicBlock::Create(*TheContext, "", parent);
+  auto body_else = llvm::BasicBlock::Create(*TheContext, "", parent);
   llvm::Value *body_ret;
   llvm::Value *else_ret;
-  auto post = llvm::BasicBlock::Create(*TheContext);
+  auto post = llvm::BasicBlock::Create(*TheContext, "", parent);
   TheBuilder->CreateCondBr(if_cond, body, body_else);
   TheBuilder->SetInsertPoint(body);
   {
@@ -529,12 +552,13 @@ ASTWhile::~ASTWhile() {
 }
 
 llvm::Value *ASTWhile::codegen(CompilerStackFrame *frame) {
-  auto while_cond = llvm::BasicBlock::Create(*TheContext);
+  auto parent = TheBuilder->GetInsertBlock()->getParent();
+  auto while_cond = llvm::BasicBlock::Create(*TheContext, "", parent);
   TheBuilder->CreateBr(while_cond);
   TheBuilder->SetInsertPoint(while_cond);
   auto the_condition = condition_->codegen(frame);
-  auto while_body = llvm::BasicBlock::Create(*TheContext);
-  auto post_while = llvm::BasicBlock::Create(*TheContext);
+  auto while_body = llvm::BasicBlock::Create(*TheContext, "", parent);
+  auto post_while = llvm::BasicBlock::Create(*TheContext, "", parent);
   TheBuilder->CreateCondBr(the_condition, while_body, post_while);
 
   TheBuilder->SetInsertPoint(while_body);
@@ -554,7 +578,13 @@ ASTReturn::ASTReturn(ASTNode *value, unsigned long pos)
 ASTReturn::~ASTReturn() { delete value_; }
 
 llvm::Value *ASTReturn::codegen(CompilerStackFrame *frame) {
-  TheBuilder->CreateRet(value_->codegen(frame));
+  auto val = value_->codegen(frame);
+  if (val->getType()->isVoidTy()) {
+    TheBuilder->CreateRetVoid();
+  } else {
+    TheBuilder->CreateRet(val);
+  }
+  
   return llvm::PoisonValue::get(TheBuilder->getVoidTy());
 }
 
@@ -613,17 +643,19 @@ ASTForIn::~ASTForIn() {
 }
 
 llvm::Value *ASTForIn::codegen(CompilerStackFrame *frame) {
+  auto parent = TheBuilder->GetInsertBlock()->getParent();
+
   auto source_array = array_->codegen(frame);
   auto iterator_var = TheBuilder->CreateAlloca(TheBuilder->getInt64Ty());
   TheBuilder->CreateStore(TheBuilder->getInt64(0), iterator_var);
 
-  auto array_comp_loop = llvm::BasicBlock::Create(*TheContext);
+  auto array_comp_loop = llvm::BasicBlock::Create(*TheContext, "", parent);
   TheBuilder->CreateBr(array_comp_loop);
   CompilerStackFrame generation_frame(frame);
   generation_frame.set(variable_, TheBuilder->CreateGEP(source_array->getType()->getArrayElementType()->getPointerTo(), source_array, TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var)));
   body_->codegen(&generation_frame);
   TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(1)), iterator_var);
-  auto array_comp_loop_end = llvm::BasicBlock::Create(*TheContext);
+  auto array_comp_loop_end = llvm::BasicBlock::Create(*TheContext, "", parent);
   TheBuilder->CreateCondBr(
     TheBuilder->CreateICmpULT(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(source_array->getType()->getArrayNumElements())),
     array_comp_loop,
@@ -644,19 +676,21 @@ ASTArrayComprehension::~ASTArrayComprehension() {
 }
 
 llvm::Value *ASTArrayComprehension::codegen(CompilerStackFrame *frame) {
+  auto parent = TheBuilder->GetInsertBlock()->getParent();
+
   auto source_array = array_->codegen(frame);
   auto dest_array = TheBuilder->CreateAlloca(source_array->getType());
   auto iterator_var = TheBuilder->CreateAlloca(TheBuilder->getInt64Ty());
   TheBuilder->CreateStore(TheBuilder->getInt64(0), iterator_var);
 
-  auto array_comp_loop = llvm::BasicBlock::Create(*TheContext);
+  auto array_comp_loop = llvm::BasicBlock::Create(*TheContext, "", parent);
   TheBuilder->CreateBr(array_comp_loop);
   CompilerStackFrame generation_frame(frame);
   generation_frame.set(variable_, TheBuilder->CreateGEP(source_array->getType()->getArrayElementType()->getPointerTo(), source_array, TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var)));
   auto result_val = body_->codegen(&generation_frame);
   TheBuilder->CreateStore(result_val, TheBuilder->CreateGEP(source_array->getType()->getArrayElementType()->getPointerTo(), dest_array, std::vector<llvm::Value *>({TheBuilder->getInt64(0), TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var)})));
   TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(1)), iterator_var);
-  auto array_comp_loop_end = llvm::BasicBlock::Create(*TheContext);
+  auto array_comp_loop_end = llvm::BasicBlock::Create(*TheContext, "", parent);
   TheBuilder->CreateCondBr(
     TheBuilder->CreateICmpULT(TheBuilder->CreateLoad(iterator_var->getAllocatedType(),iterator_var), TheBuilder->getInt64(source_array->getType()->getArrayNumElements())),
     array_comp_loop,
@@ -675,18 +709,20 @@ ASTRange::~ASTRange() {
 }
 
 llvm::Value *ASTRange::codegen(CompilerStackFrame *frame) {
+  auto parent = TheBuilder->GetInsertBlock()->getParent();
+
   auto start = start_->codegen(frame);
   auto end = end_->codegen(frame);
   auto len = TheBuilder->CreateSub(end, start);
   auto storage = TheBuilder->CreateAlloca(start->getType(), len);
   auto iterator_var = TheBuilder->CreateAlloca(start->getType());
   TheBuilder->CreateStore(0, iterator_var);
-  auto loop_body = llvm::BasicBlock::Create(*TheContext);
+  auto loop_body = llvm::BasicBlock::Create(*TheContext, "", parent);
   TheBuilder->CreateBr(loop_body);
   TheBuilder->SetInsertPoint(loop_body);
   TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var), start), TheBuilder->CreateGEP(storage->getAllocatedType()->getArrayElementType()->getPointerTo(), storage, std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var)})));
   TheBuilder->CreateStore(TheBuilder->CreateAdd(TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var), TheBuilder->getInt64(1)), iterator_var);
-  auto loop_end = llvm::BasicBlock::Create(*TheContext);
+  auto loop_end = llvm::BasicBlock::Create(*TheContext, "", parent);
   TheBuilder->CreateCondBr(
     TheBuilder->CreateICmpULT(TheBuilder->CreateLoad(iterator_var->getAllocatedType(), iterator_var), len),
     loop_body,
@@ -694,4 +730,22 @@ llvm::Value *ASTRange::codegen(CompilerStackFrame *frame) {
   );
   TheBuilder->SetInsertPoint(loop_end);
   return TheBuilder->CreateLoad(storage->getAllocatedType(), storage);
+}
+
+ASTFunctionType::ASTFunctionType(ASTType *return_type, std::vector<ASTType *> arg_types, unsigned long pos) : ASTType(pos), ret_type_(return_type), arg_types_(arg_types) {}
+
+ASTFunctionType::~ASTFunctionType() {
+  delete ret_type_;
+  for (auto atype : arg_types_) {
+    delete atype;
+  }
+}
+
+llvm::Type *ASTFunctionType::into_llvm_type() {
+  std::vector<llvm::Type *> args;
+  args.reserve(arg_types_.size());
+  for (auto arg : arg_types_) {
+    args.push_back(arg->into_llvm_type());
+  }
+  return llvm::FunctionType::get(ret_type_->into_llvm_type(), args, false)->getPointerTo();
 }

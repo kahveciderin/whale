@@ -82,6 +82,20 @@ class ASTBaseType : public ASTType {
  private:
   std::string name_;
 };
+class ASTFunctionType : public ASTType {
+  public:
+    ASTFunctionType(ASTType *return_type, std::vector<ASTType *> arg_types, unsigned long pos = 0);
+    virtual ~ASTFunctionType();
+    virtual void print(std::ostream &out, int level) const;
+    virtual llvm::Type *into_llvm_type();
+    virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                void *out) const;
+    virtual const std::string returnType(Runner *runner,
+                RunnerStackFrame *stack) const;
+  private:
+    ASTType *ret_type_;
+    std::vector<ASTType *> arg_types_;
+};
 class ASTFunctionArg;
 class ASTNodeList : public ASTNode {
  public:
