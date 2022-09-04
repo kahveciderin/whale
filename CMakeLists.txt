@@ -19,9 +19,13 @@ execute_process(COMMAND llvm-config-14 --system-libs --link-shared --libs all
                 OUTPUT_VARIABLE llvm_libs
                 OUTPUT_STRIP_TRAILING_WHITESPACE)
 
+                message(STATUS "LLVM linked with ${llvm_libs}")
+
 target_link_libraries(whale ${llvm_libs} ${targets})
 
-target_compile_options(whale PUBLIC -fstandalone-debug)
+target_compile_options(whale PUBLIC)
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
 include(CPack)
+
+file(COPY tests DESTINATION .)
