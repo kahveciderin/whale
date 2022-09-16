@@ -75,7 +75,7 @@ int main() {
   llvm::InitializeAllTargetMCs();
   llvm::InitializeAllAsmParsers();
   llvm::InitializeAllAsmPrinters();
-  std::ifstream file("tests/hello.wha");
+  std::ifstream file("tests/fib.wha");
   std::istream &code = static_cast<std::istream &>(file);
 
   Parser parser(code);

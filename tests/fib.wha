@@ -8,7 +8,8 @@ fun(void) main = %{
 
     i32 i = 1;
     while i <= 30 {
-        printf("%d", fib(i));
+        printf("Fib %d: %d\n", i,  fib(i));
         i = i + 1;
     };
+    return;
 };

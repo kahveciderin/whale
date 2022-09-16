@@ -544,7 +544,7 @@ if (in_.peek() == '%') {
     } else if (name == "return" || name == "ret") {
     skipWhitespace();
     if (in_.peek() == ';') {
-        return new ASTReturn(nullptr, in_.tellg());
+        return new ASTReturn(new ASTVoid(in_.tellg()), in_.tellg());
     } else {
         ASTNode *value = parseExpression();
         result = new ASTReturn(value, in_.tellg());

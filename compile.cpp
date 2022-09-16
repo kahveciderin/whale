@@ -1,6 +1,7 @@
 #include "ast.hpp"
 #include "parser.hpp"
 #include <exception>
+#include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
@@ -187,7 +188,7 @@ llvm::Value *ASTLambda::codegen(CompilerStackFrame *frame) {
 
   TheBuilder->SetInsertPoint(lambda_setup_block);
   for (int i=0;i<replace_later.size();i++) {
-    replace_later[i]->replaceAllUsesWith(TheBuilder->CreateGEP(lambda_trampoline_data, lambda_func->getArg(0), std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(i)})));
+    replace_later[i]->replaceAllUsesWith(TheBuilder->CreateLoad(implicit_args[i], TheBuilder->CreatePointerCast(TheBuilder->CreateGEP(lambda_trampoline_data, lambda_func->getArg(0), std::vector<llvm::Value *>({TheBuilder->getInt32(0), TheBuilder->getInt32(i)})), implicit_args[i]->getPointerTo())));
   }
   TheBuilder->CreateBr(lambda_body);
 
@@ -201,8 +202,12 @@ llvm::Value *ASTLambda::codegen(CompilerStackFrame *frame) {
   //create trampoline intrinsic
   //TODO unmapping this memory sometime is something to be considered.
   auto tramp_memory = TheBuilder->CreateCall(Module->getFunction("mmap"), std::vector<llvm::Value *>({TheBuilder->CreateCast(llvm::Instruction::BitCast, TheBuilder->getInt64(0), TheBuilder->getVoidTy()->getPointerTo()), TheBuilder->getInt64(72), TheBuilder->getInt32(PROT_READ | PROT_WRITE | PROT_EXEC), TheBuilder->getInt32(MAP_ANONYMOUS | MAP_PRIVATE), TheBuilder->getInt32(0), TheBuilder->getInt64(0)}));
-
-  TheBuilder->CreateIntrinsic(llvm::Intrinsic::init_trampoline, std::vector<llvm::Type *>({}), std::vector<llvm::Value *>({TheBuilder->CreatePointerCast(tramp_memory, TheBuilder->getInt8PtrTy()), TheBuilder->CreatePointerCast(lambda_func, TheBuilder->getInt8PtrTy()), TheBuilder->CreatePointerCast(the_trampoline_object, TheBuilder->getInt8PtrTy())}));
+  //technically true
+  //tramp_memory->setDoesNotAccessMemory();
+  tramp_memory->setCannotMerge();
+  
+  auto init_tramp = TheBuilder->CreateIntrinsic(llvm::Intrinsic::init_trampoline, std::vector<llvm::Type *>({}), std::vector<llvm::Value *>({TheBuilder->CreatePointerCast(tramp_memory, TheBuilder->getInt8PtrTy()), TheBuilder->CreatePointerCast(lambda_func, TheBuilder->getInt8PtrTy()), TheBuilder->CreatePointerCast(the_trampoline_object, TheBuilder->getInt8PtrTy())}));
+  init_tramp->setOnlyAccessesArgMemory();
   auto the_final_func_ptr = TheBuilder->CreateIntrinsic(llvm::Intrinsic::adjust_trampoline, std::vector<llvm::Type *>({}), std::vector<llvm::Value *>({TheBuilder->CreatePointerCast(tramp_memory, TheBuilder->getInt8PtrTy())}));
   total_args.erase(total_args.begin());
   
@@ -397,11 +402,9 @@ ASTCast::~ASTCast() {
   delete value_;
 }
 
-llvm::Value *ASTCast::codegen(CompilerStackFrame *frame) {
+llvm::Value *create_complex_cast(llvm::Value *val, llvm::Type *type_to) {
   llvm::Instruction::CastOps op = llvm::Instruction::CastOps::BitCast;
-  auto orig_val = value_->codegen(frame);
-  auto type_from = orig_val->getType();
-  auto type_to = type_->into_llvm_type();
+  auto type_from = val->getType();
   if (type_to->isPointerTy() && type_from->isPointerTy()) {
     op = llvm::Instruction::CastOps::BitCast;
   } else if (type_from->isFloatTy()) {
@@ -422,7 +425,13 @@ llvm::Value *ASTCast::codegen(CompilerStackFrame *frame) {
     op = llvm::Instruction::CastOps::Trunc;
   }
 
-  return TheBuilder->CreateCast(op, orig_val, type_to);
+  return TheBuilder->CreateCast(op, val, type_to);
+}
+
+llvm::Value *ASTCast::codegen(CompilerStackFrame *frame) {
+  auto orig_val = value_->codegen(frame);
+  auto type_to = type_->into_llvm_type();
+  return create_complex_cast(orig_val, type_to);
 }
 
 ASTVariableDecl::ASTVariableDecl(const std::string &name, ASTType *type, ASTNode *value,
@@ -465,7 +474,7 @@ ASTVariableAssign::~ASTVariableAssign() { delete value_; }
 
 llvm::Value *ASTVariableAssign::codegen(CompilerStackFrame *frame) {
   auto varspace = frame->resolve(name_);
-  auto val = TheBuilder->CreateBitCast(value_->codegen(frame), varspace->getType()->getPointerElementType());
+  auto val = create_complex_cast(value_->codegen(frame), varspace->getType()->getPointerElementType());
 
   TheBuilder->CreateStore(val, varspace);
   return val;
@@ -518,6 +527,7 @@ llvm::Value *ASTIf::codegen(CompilerStackFrame *frame) {
   {
     CompilerStackFrame frame_body(frame);
     body_ret = body_->codegen(&frame_body);
+    TheBuilder->CreateBr(post);
   }
   TheBuilder->SetInsertPoint(body_else);
   {
@@ -525,27 +535,22 @@ llvm::Value *ASTIf::codegen(CompilerStackFrame *frame) {
     if (elseBody_) {
       else_ret = elseBody_->codegen(&frame_else);
     }
+    TheBuilder->CreateBr(post);
   }
+
+  TheBuilder->SetInsertPoint(post);
+
   auto ty_t = body_ret->getType();
   auto ty_f = else_ret->getType();
   llvm::Value *return_val;
   if ((ty_t->getTypeID() != ty_f->getTypeID()) || ty_t->isVoidTy()) {
     return_val = llvm::PoisonValue::get(TheBuilder->getVoidTy());
   } else {
-    TheBuilder->SetInsertPoint(common_var_setup_point);
-    auto rvar = TheBuilder->CreateAlloca(ty_t);
-    TheBuilder->SetInsertPoint(body);
-    TheBuilder->CreateStore(body_ret, rvar);
-    TheBuilder->SetInsertPoint(body_else);
-    TheBuilder->CreateStore(else_ret, rvar);
-    TheBuilder->SetInsertPoint(post);
-    return_val = TheBuilder->CreateLoad(ty_t,rvar);
+    auto phi = TheBuilder->CreatePHI(ty_t, 2);
+    phi->addIncoming(body_ret, body);
+    phi->addIncoming(else_ret, body_else);
+    return_val = phi;
   }
-  TheBuilder->SetInsertPoint(body);
-  TheBuilder->CreateBr(post);
-  TheBuilder->SetInsertPoint(body_else);
-  TheBuilder->CreateBr(post);
-  TheBuilder->SetInsertPoint(post);
   return return_val;
 }
 
@@ -588,8 +593,10 @@ llvm::Value *ASTReturn::codegen(CompilerStackFrame *frame) {
   if (val->getType()->isVoidTy()) {
     TheBuilder->CreateRetVoid();
   } else {
-    TheBuilder->CreateRet(TheBuilder->CreateBitCast(val, TheBuilder->getCurrentFunctionReturnType()));
+    TheBuilder->CreateRet(create_complex_cast(val, TheBuilder->getCurrentFunctionReturnType()));
   }
+  auto deadcode = llvm::BasicBlock::Create(*TheContext, "_deadcode", TheBuilder->GetInsertBlock()->getParent());
+  TheBuilder->SetInsertPoint(deadcode);
   
   return llvm::PoisonValue::get(TheBuilder->getVoidTy());
 }

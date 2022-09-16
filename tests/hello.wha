@@ -1,3 +1,6 @@
 fun(void) main = %{
-    printf("Hello World\n");
+    fun(void) mylambda = %{
+        printf("Hello World\n");
+    };
+    mylambda();
 };
