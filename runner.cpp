@@ -55,10 +55,6 @@ RunnerStackFrame::Variable *RunnerStackFrame::getVariable(const std::string &nam
     if (this->parent_ != nullptr) return this->parent_->getVariable(name);
     throw std::runtime_error("Variable not found: " + name);
 };
-template <typename T>
-T RunnerStackFrame::getVariable(const std::string &name) {
-    return *(T *)this->getVariable(name)->ptr_;
-};
 void * RunnerStackFrame::allocVariable(const std::string &name, ASTType *type, Runner *runner) {
     int size;
     type->run(runner, this, &size);

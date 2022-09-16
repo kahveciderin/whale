@@ -40,7 +40,9 @@ class RunnerStackFrame {
 
   Variable *getVariable(const std::string &name);
   template <typename T>
-  T getVariable(const std::string &name);
+  T getVariable(const std::string &name) {
+    return *(T *)this->getVariable(name)->ptr_;
+  };
   void *allocVariable(const std::string &name, ASTType *type, Runner *runner);
 
   RunnerStackFrame *parent_;
