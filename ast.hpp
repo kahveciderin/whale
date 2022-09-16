@@ -12,6 +12,7 @@ extern std::unique_ptr<llvm::Module> Module;
 class CompilerStackFrame {
   public:
     CompilerStackFrame(CompilerStackFrame *parent = nullptr);
+    virtual ~CompilerStackFrame();
     void set(std::string name, llvm::Value *varspace);
     virtual llvm::Value *resolve(std::string name);
   protected:

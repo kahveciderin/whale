@@ -95,8 +95,8 @@ ASTNode *Parser::parse(bool standalone) {
         throw std::runtime_error("Unexpected token : EOF expected");
     }
     if (standalone) {
-        result->add(new ASTReturn(
-            new ASTFunctionCall(new ASTVariable("main"), new ASTNodeList())));
+        result->add(
+            new ASTFunctionCall(new ASTVariable("main"), new ASTNodeList()));
     }
     return result;
 }

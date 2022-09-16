@@ -13,6 +13,14 @@
 WithPos::WithPos(unsigned long p) : pos_(p) {}
 
 CompilerStackFrame::CompilerStackFrame(CompilerStackFrame *parent) : parent(parent) {}
+
+CompilerStackFrame::~CompilerStackFrame() {
+  for (auto thing = this->data.begin(); thing != this->data.end(); thing++) {
+    //TODO: This somehow breaks everything. Find a way to add lifetimes properly.
+    //TheBuilder->CreateLifetimeEnd(thing->second);
+  }
+}
+
 void CompilerStackFrame::set(std::string name, llvm::Value *varspace) {
     data[name] = varspace;
 }
@@ -450,6 +458,7 @@ llvm::Value *ASTVariableDecl::codegen(CompilerStackFrame *frame) {
       auto val = value_->codegen(frame);
       TheBuilder->CreateStore(val, varspace);
     }
+    //TheBuilder->CreateLifetimeStart(varspace);
     return llvm::PoisonValue::get(TheBuilder->getVoidTy());
 }
 
@@ -513,7 +522,7 @@ ASTIf::~ASTIf() {
 llvm::Value *ASTIf::codegen(CompilerStackFrame *frame) {
   auto parent = TheBuilder->GetInsertBlock()->getParent();
   auto before_the_if = llvm::BasicBlock::Create(*TheContext, "", parent);
-  auto common_var_setup_point = TheBuilder->CreateBr(before_the_if);
+  TheBuilder->CreateBr(before_the_if);
   TheBuilder->SetInsertPoint(before_the_if);
   auto if_cond = condition_->codegen(frame);
   

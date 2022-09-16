@@ -60,7 +60,7 @@
 #include "parser.hpp"
 #include "runner.hpp"
 
-#define USE_LLVM 0
+#define USE_LLVM 1
 
 std::unique_ptr<llvm::LLVMContext> TheContext;
 std::unique_ptr<llvm::IRBuilder<>> TheBuilder;
@@ -137,16 +137,26 @@ int main() {
       llvm::GlobalValue::ExternalLinkage, "main", *Module);
   auto program = llvm::BasicBlock::Create(*TheContext, "", entry);
   TheBuilder->SetInsertPoint(program);
-  CompilerStackFrame frame;
-
+  llvm::Value *retval_final;
   try {
-    ast->codegen(&frame);
+    {
+      CompilerStackFrame frame;
+      retval_final = ast->codegen(&frame);
+    };
+    if (retval_final->getType()->isVoidTy()) {
+      TheBuilder->CreateRetVoid();
+    } else {
+      TheBuilder->CreateRet(retval_final);
+    }
   } catch (std::exception e) {
     std::cerr << e.what() << std::endl;
     std::cerr.flush();
     return -1;
+  } catch (std::string e) {
+    std::cerr << e << std::endl;
+    std::cerr.flush();
+    return -1;
   }
-
   llvm::verifyModule(*Module, &llvm::errs());
   // OPTIMIZATION PASSES
   // pre-opt print
