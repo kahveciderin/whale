@@ -30,6 +30,10 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Host.h>
 #include <llvm/Support/TargetSelect.h>
+#include <llvm/IR/PassManager.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/IR/Verifier.h>
+#include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetLoweringObjectFile.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
@@ -47,6 +51,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <ostream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -55,7 +60,7 @@
 #include "parser.hpp"
 #include "runner.hpp"
 
-#define USE_LLVM 0
+#define USE_LLVM 1
 
 std::unique_ptr<llvm::LLVMContext> TheContext;
 std::unique_ptr<llvm::IRBuilder<>> TheBuilder;
@@ -69,8 +74,13 @@ void init_module() {
 
 int main() {
   std::cout.precision(std::numeric_limits<double>::max_digits10);
-
-  std::ifstream file("tests/initial.wha");
+  init_module();
+  llvm::InitializeAllTargetInfos();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmParsers();
+  llvm::InitializeAllAsmPrinters();
+  std::ifstream file("tests/fib.wha");
   std::istream &code = static_cast<std::istream &>(file);
 
   Parser parser(code);
@@ -94,6 +104,11 @@ int main() {
   auto TargetTriple = llvm::sys::getDefaultTargetTriple();
   Module->setTargetTriple(TargetTriple);
   auto Target = llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
+  if (!Target) {
+    llvm::errs() << Error;
+    llvm::errs().flush();
+    return -1;
+  }
   llvm::TargetOptions opt;
   auto RM = llvm::Optional<llvm::Reloc::Model>();
   auto Features = "";
@@ -102,7 +117,9 @@ int main() {
       Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM);
 
   auto DL = llvm::DataLayout(&*Module);
-
+  //for testing
+  llvm::Function::Create(llvm::FunctionType::get(TheBuilder->getInt32Ty(), std::vector<llvm::Type *>({TheBuilder->getInt8PtrTy()}), true), llvm::GlobalObject::ExternalLinkage, "printf", *Module);
+  
   llvm::Function::Create(
       llvm::FunctionType::get(
           TheBuilder->getVoidTy()->getPointerTo(),
@@ -120,14 +137,26 @@ int main() {
       llvm::GlobalValue::ExternalLinkage, "main", *Module);
   auto program = llvm::BasicBlock::Create(*TheContext, "", entry);
   TheBuilder->SetInsertPoint(program);
-  CompilerStackFrame frame;
-  ast->codegen(&frame);
-  llvm::InitializeAllTargetInfos();
-  llvm::InitializeAllTargets();
-  llvm::InitializeAllTargetMCs();
-  llvm::InitializeAllAsmParsers();
-  llvm::InitializeAllAsmPrinters();
-
+  llvm::Value *retval_final;
+  try {
+    {
+      CompilerStackFrame frame;
+      retval_final = ast->codegen(&frame);
+    };
+    if (retval_final->getType()->isVoidTy()) {
+      TheBuilder->CreateRetVoid();
+    } else {
+      TheBuilder->CreateRet(retval_final);
+    }
+  } catch (std::exception e) {
+    std::cerr << e.what() << std::endl;
+    std::cerr.flush();
+    return -1;
+  } catch (std::string e) {
+    std::cerr << e << std::endl;
+    std::cerr.flush();
+    return -1;
+  }
   llvm::verifyModule(*Module, &llvm::errs());
   // OPTIMIZATION PASSES
   // pre-opt print

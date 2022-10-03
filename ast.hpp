@@ -12,6 +12,7 @@ extern std::unique_ptr<llvm::Module> Module;
 class CompilerStackFrame {
   public:
     CompilerStackFrame(CompilerStackFrame *parent = nullptr);
+    virtual ~CompilerStackFrame();
     void set(std::string name, llvm::Value *varspace);
     virtual llvm::Value *resolve(std::string name);
   protected:
@@ -81,6 +82,20 @@ class ASTBaseType : public ASTType {
                 RunnerStackFrame *stack) const;
  private:
   std::string name_;
+};
+class ASTFunctionType : public ASTType {
+  public:
+    ASTFunctionType(ASTType *return_type, std::vector<ASTType *> arg_types, unsigned long pos = 0);
+    virtual ~ASTFunctionType();
+    virtual void print(std::ostream &out, int level) const;
+    virtual llvm::Type *into_llvm_type();
+    virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                void *out) const;
+    virtual const std::string returnType(Runner *runner,
+                RunnerStackFrame *stack) const;
+  private:
+    ASTType *ret_type_;
+    std::vector<ASTType *> arg_types_;
 };
 class ASTFunctionArg;
 class ASTNodeList : public ASTNode {
@@ -535,6 +550,20 @@ class ASTNull : public ASTNode {
   virtual llvm::Value *codegen(CompilerStackFrame *frame);
 
  private:
+};
+class ASTVoid : public ASTNode {
+  public:
+  ASTVoid(unsigned long pos = 0);
+
+  virtual ~ASTVoid();
+
+  virtual void print(std::ostream &out, int level) const;
+
+  virtual void run(Runner *runner, RunnerStackFrame *stackFrame,
+                   void *out) const;
+  virtual const std::string returnType(Runner *runner,
+                                       RunnerStackFrame *stack) const;
+  virtual llvm::Value *codegen(CompilerStackFrame *frame);
 };
 class ASTBool : public ASTNode {
  public:

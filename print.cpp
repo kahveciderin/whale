@@ -145,6 +145,10 @@ void ASTNull::print(std::ostream &out, int level) const {
   out << indent(level) << "Null" << std::endl;
 }
 
+void ASTVoid::print(std::ostream &out, int level) const {
+  out << indent(level) << "Void" << std::endl;
+}
+
 void ASTBool::print(std::ostream &out, int level) const {
   out << indent(level) << "Bool: " << value_ << std::endl;
 }
@@ -173,3 +177,13 @@ void ASTRange::print(std::ostream &out, int level) const {
   start_->print(out, level + 1);
   end_->print(out, level + 1);
 }
+
+void ASTFunctionType::print(std::ostream &out, int level) const {
+  out << indent(level) << "FunctionType: " << std::endl;
+  out << indent(level + 1) << "Return Type: " << std::endl;
+  ret_type_->print(out, level + 1);
+  out << indent(level + 1) << "Arg Types: " << std::endl;
+  for (auto arg : arg_types_) {
+    arg->print(out, level + 1);
+  }
+};
